@@ -1,0 +1,10 @@
+{
+  "split": {"title": "Разбиение TCP по имени домена", "args": ["--split-pos=1,midsld", "--hostcase"]},
+  "split-disorder": {"title": "Разбиение TCP с изменением порядка", "args": ["--split-pos=1,midsld", "--disorder", "--hostcase"]},
+  "split-small": {"title": "Короткие первые TCP-сегменты", "args": ["--split-pos=1,2", "--hostcase"]},
+  "tlsrec": {"title": "Разбиение TLS-записи", "args": ["--tlsrec=midsld", "--split-pos=1", "--hostcase"]},
+  "tlsrec-disorder": {"title": "TLS-запись и порядок TCP", "args": ["--tlsrec=midsld", "--split-pos=1,midsld", "--disorder", "--hostcase"]},
+  "oob": {"title": "Разбиение с TCP OOB", "args": ["--split-pos=midsld", "--oob", "--hostcase"]},
+  "http-eol": {"title": "HTTP EOL и разбиение TLS", "args": ["--split-pos=1,midsld", "--methodeol", "--hostcase"]},
+  "passthrough": {"title": "Контрольный профиль без изменения данных", "args": []}
+}

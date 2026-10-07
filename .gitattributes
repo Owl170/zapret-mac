@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.zip binary
+*.bin binary
+# Preserve the exact bytes of the bundled upstream files and their licenses.
+engine/** -text
+licenses/** -text
+lists/** -text
+targets.txt -text

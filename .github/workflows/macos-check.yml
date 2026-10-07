@@ -1,0 +1,27 @@
+name: macOS validation
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Python checks
+        run: python3 -m unittest discover -s tests -v
+      - name: Build universal official engine
+        run: make -C engine/tpws mac CC=clang CFLAGS='-std=gnu99 -Os -ffunction-sections -fdata-sections' LDFLAGS=''
+      - name: Validate actual engine options and PF syntax
+        run: sudo python3 scripts/check_native.py engine/tpws/tpws
+      - name: Validate PF ABI
+        run: |
+          clang -Iengine/tpws/macos native/pf_abi_probe.c -o /tmp/zmac-pf-abi
+          /tmp/zmac-pf-abi > /tmp/zmac-native-abi.json
+          python3 discord_udp.py abi > /tmp/zmac-python-abi.json
+          python3 -c 'import json; assert json.load(open("/tmp/zmac-native-abi.json")) == json.load(open("/tmp/zmac-python-abi.json"))'
+      - name: Verify end-to-end PF UDP path
+        run: sudo python3 scripts/check_pf_udp.py
