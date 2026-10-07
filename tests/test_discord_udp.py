@@ -11,7 +11,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discord_udp as u
@@ -20,6 +20,17 @@ import zapret as z
 
 
 class PacketTests(unittest.TestCase):
+    def test_probe_requires_exact_echo_even_after_pending_icmp(self):
+        token = '01' * 16
+        client = MagicMock()
+        client.__enter__.return_value = client
+        packet = u.TEST_PREFIX + bytes.fromhex(token)
+        client.recv.side_effect = [OSError(errno.EHOSTUNREACH, 'pending ICMP'), packet]
+        with patch.object(socket, 'socket', return_value=client):
+            u.probe(u.TEST4, token)
+        self.assertEqual(client.recv.call_count, 2)
+        client.send.assert_called_once_with(packet)
+
     def test_discovery_and_stun_detection(self):
         discovery = b'\x00\x01\x00\x46' + struct.pack('!I', 123) + bytes(66)
         self.assertEqual(u.classify(discovery), 'discord-discovery')

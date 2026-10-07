@@ -319,8 +319,23 @@ def probe(address, token, timeout=3):
     with socket.socket(family, socket.SOCK_DGRAM) as client:
         client.settimeout(timeout)
         client.connect((address, TEST_PORT))
-        client.send(packet)
-        response = client.recv(4096)
+        deadline = time.monotonic() + timeout
+        try:
+            client.send(packet)
+        except OSError as error:
+            if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                raise
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Error('UDP-самопроверка не получила точный обратный ответ.')
+            client.settimeout(remaining)
+            try:
+                response = client.recv(4096)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                    raise
         if response != packet:
             raise Error('UDP-самопроверка получила неправильный ответ.')
     print('UDP PF loop verified:', address)
