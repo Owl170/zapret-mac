@@ -32,13 +32,14 @@ def udp_rules(cfg, root=z.ROOT, linklocal='fe80::1', probe_only=False):
     if cfg['ipv6']:
         rows.append(f'rdr pass on lo0 inet6 proto udp from !::1 to {target6} -> {linklocal} port {UDP_PORT}')
     # Explicit probes bypass exclusions and never leave the relay for the WAN.
-    rows.append(f'pass out route-to (lo0 127.0.0.1) inet proto udp from !127.0.0.0/8 to {TEST4} port {TEST_PORT} user {{ >root }} label "zmac-udp-probe"')
+    # Keep NAT state at the rdr rule only. A second route-to state can reroute replies.
+    rows.append(f'pass out route-to (lo0 127.0.0.1) inet proto udp from !127.0.0.0/8 to {TEST4} port {TEST_PORT} user {{ >root }} no state label "zmac-udp-probe"')
     if not probe_only:
-        rows.append(f'pass out route-to (lo0 127.0.0.1) inet proto udp from !127.0.0.0/8 to !<zmac_udp_ex4> port {{{normal}}} user {{ >root }} label "zmac-udp"')
+        rows.append(f'pass out route-to (lo0 127.0.0.1) inet proto udp from !127.0.0.0/8 to !<zmac_udp_ex4> port {{{normal}}} user {{ >root }} no state label "zmac-udp"')
     if cfg['ipv6']:
-        rows.append(f'pass out route-to (lo0 {linklocal}) inet6 proto udp from !::1 to {TEST6} port {TEST_PORT} user {{ >root }} label "zmac-udp-probe"')
+        rows.append(f'pass out route-to (lo0 {linklocal}) inet6 proto udp from !::1 to {TEST6} port {TEST_PORT} user {{ >root }} no state label "zmac-udp-probe"')
         if not probe_only:
-            rows.append(f'pass out route-to (lo0 {linklocal}) inet6 proto udp from !::1 to !<zmac_udp_ex6> port {{{normal}}} user {{ >root }} label "zmac-udp"')
+            rows.append(f'pass out route-to (lo0 {linklocal}) inet6 proto udp from !::1 to !<zmac_udp_ex6> port {{{normal}}} user {{ >root }} no state label "zmac-udp"')
     return '\n'.join(rows) + '\n'
 
 

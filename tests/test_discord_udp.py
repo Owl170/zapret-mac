@@ -242,6 +242,7 @@ class ControllerTests(unittest.TestCase):
         self.assertNotEqual(v.UDP_ANCHOR, z.ANCHOR)
         self.assertIn('user { >root }', rules)
         self.assertIn(u.TEST4, rules)
+        self.assertTrue(all('no state' in line for line in rules.splitlines() if 'route-to' in line))
 
     def test_voice_control_tcp_accepts_dynamic_ports(self):
         cfg = dict(z.DEFAULTS, voice_udp=True)

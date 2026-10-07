@@ -45,6 +45,7 @@ try:
                 diagnostic = root / 'logs/udp-start-failure.json'
                 if diagnostic.exists():
                     print(diagnostic.read_text())
+                print('Relay final counters:', json.dumps(v.read_status(root), ensure_ascii=False, indent=2))
                 print('lo0:', z.run(['/sbin/ifconfig', 'lo0'], check=False).stdout)
                 print('probe route:', z.run(['/sbin/route', '-n', 'get', v.TEST4], check=False).stdout)
                 raise SystemExit('FAIL: ' + backend.error)
