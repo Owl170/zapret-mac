@@ -112,7 +112,7 @@ class NativeControllerTests(unittest.TestCase):
     def test_pf_cleanup_only_replaces_our_anchor(self):
         with patch.object(z, 'pf') as pf:
             z.clear_anchor()
-        pf.assert_called_once_with('-a', z.ANCHOR, '-f', '-', input='', check=False)
+        pf.assert_called_once_with('-a', z.ANCHOR, '-f', '-', input='')
 
     def test_custom_active_pf_is_not_overwritten(self):
         with patch.object(z, 'pf', side_effect=[SimpleNamespace(stdout='block all'), SimpleNamespace(stdout='')]) as pf:

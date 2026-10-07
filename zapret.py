@@ -111,9 +111,9 @@ def ports(value):
 
 
 def validate_config(cfg, root=ROOT):
-    if set(cfg) != set(DEFAULTS):
+    if not isinstance(cfg, dict) or set(cfg) != set(DEFAULTS):
         raise Error('Неверные поля config.json.')
-    if cfg['strategy'] not in strategies(root):
+    if not isinstance(cfg['strategy'], str) or cfg['strategy'] not in strategies(root):
         raise Error('Неизвестная стратегия.')
     if cfg['ipset'] not in ('none', 'loaded', 'any'):
         raise Error('IPSet должен быть none, loaded или any.')
@@ -134,7 +134,10 @@ def validate_config(cfg, root=ROOT):
 def config(root=ROOT):
     cfg = dict(DEFAULTS)
     if (root / 'config.json').exists():
-        cfg.update(json.loads((root / 'config.json').read_text(encoding='utf-8')))
+        saved = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+        if not isinstance(saved, dict):
+            raise Error('config.json должен содержать JSON-объект с настройками.')
+        cfg.update(saved)
     return validate_config(cfg, root)
 
 
@@ -256,19 +259,40 @@ def pf(*args, **kwargs):
 
 def clear_anchor():
     # Replaces only our rules. Never flush global rules, states, or Apple's anchors.
-    pf('-a', ANCHOR, '-f', '-', input='', check=False)
+    pf('-a', ANCHOR, '-f', '-', input='')
+
+
+def cleanup_steps(*steps):
+    """Finish every independent cleanup step, then report the first failure."""
+    failures = []
+    for action in steps:
+        try:
+            action()
+        except BaseException as error:
+            failures.append(error)
+    if failures:
+        for error in failures[1:]:
+            print('Дополнительная ошибка очистки:', error, file=sys.stderr)
+        raise failures[0]
 
 
 def release_pf(root=ROOT):
-    clear_anchor()
     from voice_controller import clear_udp
-    clear_udp()
-    path = root / 'runtime' / 'pf-token.json'
-    if path.exists():
-        token = json.loads(path.read_text())['token']
-        if re.fullmatch(r'\d+', str(token)):
-            pf('-X', str(token), check=False)
-        path.unlink(missing_ok=True)
+
+    def release_token():
+        path = root / 'runtime' / 'pf-token.json'
+        if path.exists():
+            try:
+                token = json.loads(path.read_text(encoding='utf-8'))['token']
+            except (ValueError, KeyError, TypeError):
+                raise Error('Повреждён runtime/pf-token.json; токен PF сохранён для диагностики.') from None
+            if not re.fullmatch(r'\d+', str(token)):
+                raise Error('Некорректный токен PF в runtime/pf-token.json.')
+            # Keep the token for a retry if pfctl could not release our reference.
+            pf('-X', str(token))
+            path.unlink(missing_ok=True)
+
+    cleanup_steps(clear_anchor, clear_udp, release_token)
 
 
 def ensure_pf_hooks():
@@ -304,7 +328,12 @@ def apply_pf(cfg, root=ROOT):
     token = re.search(r'Token\s*:\s*(\d+)', enabled.stdout + enabled.stderr)
     if not token:
         raise Error('pfctl не вернул токен PF; правила обхода не загружены.')
-    write_json(root / 'runtime' / 'pf-token.json', dict(token=token.group(1)))
+    try:
+        write_json(root / 'runtime' / 'pf-token.json', dict(token=token.group(1)))
+    except BaseException:
+        # No persisted token means a future stop cannot release this PF reference.
+        pf('-X', token.group(1))
+        raise
     pf('-a', ANCHOR, '-f', path)
 
 
@@ -341,68 +370,74 @@ def supervise(root=ROOT):
     root.joinpath('runtime').mkdir(exist_ok=True)
     service_lock = (root / 'runtime' / 'service.lock').open('a')
     try:
-        fcntl.flock(service_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        service_lock.close()
-        raise Error('Другой supervisor уже запущен.') from None
-    if is_running(root):
-        raise Error('Другой экземпляр ZapretMac уже работает.')
-    stop_requested = False
-    child = None
-    from voice_controller import Backend
-    udp_backend = Backend(root)
+        try:
+            fcntl.flock(service_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Error('Другой supervisor уже запущен.') from None
+        if is_running(root):
+            raise Error('Другой экземпляр ZapretMac уже работает.')
+        stop_requested = False
+        child = None
+        from voice_controller import Backend
+        udp_backend = Backend(root)
 
-    def stop_signal(signum, frame):
-        nonlocal stop_requested
-        stop_requested = True
+        def stop_signal(signum, frame):
+            nonlocal stop_requested
+            stop_requested = True
 
-    signal.signal(signal.SIGTERM, stop_signal)
-    signal.signal(signal.SIGINT, stop_signal)
-    state_path = root / 'runtime' / 'state.json'
-    # Recover our stale anchor/token after an interrupted previous run.
-    release_pf(root)
-    try:
-        while not stop_requested:
-            cfg = config(root)
-            prepare_lists(root)
-            args = engine_args(cfg, root)
-            run(args + ['--dry-run'])
-            write_json(state_path, dict(pid=os.getpid(), phase='starting', strategy=cfg['strategy']))
-            child = subprocess.Popen(args)
-            wait_ready(child)
-            if stop_requested:
-                break
-            apply_pf(cfg, root)
-            udp_backend.start(cfg, cancelled=lambda: stop_requested)
-            write_json(state_path, dict(pid=os.getpid(), engine_pid=child.pid,
-                                       phase='running', strategy=cfg['strategy'], voice_udp=udp_backend.active))
-            print(f'Обход включён: {cfg["strategy"]}', flush=True)
-            while not stop_requested and child.poll() is None:
-                udp_backend.check()
-                time.sleep(0.25)
-            udp_backend.stop()
-            release_pf(root)
+        def stop_child():
             if child.poll() is None:
-                child.terminate()
-                child.wait(timeout=5)
-            if not stop_requested:
-                print('tpws завершился. Правила сняты; повтор через 3 секунды.', flush=True)
-                write_json(state_path, dict(pid=os.getpid(), phase='recovering', strategy=cfg['strategy']))
-                for _ in range(12):
-                    if stop_requested:
-                        break
+                try:
+                    child.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        child.kill()
+                    except ProcessLookupError:
+                        pass
+                    child.wait(timeout=5)
+
+        signal.signal(signal.SIGTERM, stop_signal)
+        signal.signal(signal.SIGINT, stop_signal)
+        state_path = root / 'runtime' / 'state.json'
+        try:
+            # Recover our stale anchor/token after an interrupted previous run.
+            release_pf(root)
+            while not stop_requested:
+                cfg = config(root)
+                prepare_lists(root)
+                args = engine_args(cfg, root)
+                run(args + ['--dry-run'])
+                write_json(state_path, dict(pid=os.getpid(), phase='starting', strategy=cfg['strategy']))
+                child = subprocess.Popen(args)
+                wait_ready(child)
+                if stop_requested:
+                    break
+                apply_pf(cfg, root)
+                udp_backend.start(cfg, cancelled=lambda: stop_requested)
+                write_json(state_path, dict(pid=os.getpid(), engine_pid=child.pid,
+                                           phase='running', strategy=cfg['strategy'], voice_udp=udp_backend.active))
+                print(f'Обход включён: {cfg["strategy"]}', flush=True)
+                while not stop_requested and child.poll() is None:
+                    udp_backend.check()
                     time.sleep(0.25)
+                cleanup_steps(udp_backend.stop, lambda: release_pf(root), stop_child)
+                child = None
+                if not stop_requested:
+                    print('tpws завершился. Правила сняты; повтор через 3 секунды.', flush=True)
+                    write_json(state_path, dict(pid=os.getpid(), phase='recovering', strategy=cfg['strategy']))
+                    for _ in range(12):
+                        if stop_requested:
+                            break
+                        time.sleep(0.25)
+        finally:
+            cleanup_steps(udp_backend.stop, lambda: release_pf(root),
+                          lambda: stop_child() if child else None,
+                          lambda: state_path.unlink(missing_ok=True))
     finally:
-        udp_backend.stop()
-        release_pf(root)
-        if child and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
-        state_path.unlink(missing_ok=True)
         service_lock.close()
 
 
@@ -576,10 +611,13 @@ def manage_hosts(apply, root=ROOT):
 
 def original_user():
     import pwd
-    uid = int(os.environ.get('SUDO_UID', os.getuid()))
-    if uid == 0:
-        raise Error('Запустите service.command из вашей обычной учётной записи.')
-    return pwd.getpwuid(uid)
+    try:
+        uid = int(os.environ.get('SUDO_UID', os.getuid()))
+        if uid < 1:
+            raise Error('Запустите service.command из вашей обычной учётной записи.')
+        return pwd.getpwuid(uid)
+    except (ValueError, KeyError, OverflowError):
+        raise Error('Не найдена обычная учётная запись пользователя SUDO_UID.') from None
 
 
 def clean_discord_cache(root=ROOT):
@@ -657,17 +695,20 @@ def test_strategies(root=ROOT):
             count = sum(r['tls_reached'] for r in rows if r['strategy'] == name)
             print(f'Ответы TLS: {count}/{len(targets(root))}', flush=True)
     finally:
-        try:
-            stop(root)
-        finally:
+        def restore_service():
             write_json(root / 'config.json', previous)
+            if was_running:
+                start(root)
+
+        def save_report():
             if rows:
+                report.parent.mkdir(parents=True, exist_ok=True)
                 with report.open('w', newline='', encoding='utf-8') as output:
                     writer = csv.DictWriter(output, fieldnames=['strategy', 'name', 'url', 'tls_reached', 'http', 'seconds', 'error'])
                     writer.writeheader()
                     writer.writerows(rows)
-        if was_running:
-            start(root)
+
+        cleanup_steps(lambda: stop(root), restore_service, save_report)
     print('Отчёт:', report)
     print('Прежняя стратегия восстановлена. Выберите профиль по результатам и проверьте приложения.')
 
@@ -718,30 +759,101 @@ def status(root=ROOT):
 
 def install(binary, source=SOURCE, root=ROOT):
     require_mac(True)
+    folders = ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads')
+    copies = [(source / name, root / name, 0o644)
+              for name in ('zapret.py', 'discord_udp.py', 'voice_controller.py', 'strategies.json', 'VERSION', 'targets.txt')]
+    copies += [(Path(binary), root / 'bin' / 'tpws', 0o755),
+               (source / 'payloads' / 'discord-fake.bin', root / 'payloads' / 'discord-fake.bin', 0o644)]
+    for folder in ('lists', 'licenses'):
+        for path in (source / folder).iterdir():
+            if path.is_file():
+                copies.append((path, root / folder / path.name, 0o644))
+
+    # Validate every destination before stopping a working installation or writing
+    # as root. Atomic replacement also avoids following destination hard links.
+    protected = [root.parent, root, *(root / folder for folder in folders),
+                 root / 'config.json', root / 'installation.json', *(dst for _, dst, _ in copies)]
+    for folder in folders:
+        if (root / folder).is_dir():
+            protected.extend((root / folder).rglob('*'))
+    for path in protected:
+        if path.is_symlink():
+            raise Error(f'Путь установки содержит символическую ссылку: {path}')
+    directories = [root.parent, root, *(root / folder for folder in folders)]
+    for path in directories:
+        if path.exists() and not path.is_dir():
+            raise Error(f'Ожидался каталог установки: {path}')
+        if path.exists() and hasattr(os, 'geteuid') and os.geteuid() == 0:
+            info = path.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise Error(f'Каталог установки должен принадлежать root и запрещать запись другим пользователям: {path}')
+    user = original_user()
+    for src, _, _ in copies:
+        if not src.is_file():
+            raise Error(f'Отсутствует файл установки: {src}')
+    contents = {dst: (src.read_bytes(), mode) for src, dst, mode in copies
+                if dst.parent != root / 'lists' or not dst.exists()}
+
+    # Check new strategies, preserved lists/configuration and the compiled engine
+    # without modifying the previous installation.
+    with tempfile.TemporaryDirectory(prefix='zapret-install-check-') as temporary:
+        stage = Path(temporary)
+        atomic_write(stage / 'strategies.json', contents[root / 'strategies.json'][0])
+        shutil.copytree(root / 'lists' if (root / 'lists').is_dir() else source / 'lists', stage / 'lists')
+        for src, dst, _ in copies:
+            if dst.parent == root / 'lists' and not (stage / 'lists' / dst.name).exists():
+                shutil.copy2(src, stage / 'lists' / dst.name)
+        cfg = dict(DEFAULTS)
+        if (root / 'config.json').exists():
+            saved = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+            if not isinstance(saved, dict):
+                raise Error('config.json должен содержать JSON-объект с настройками.')
+            cfg.update(saved)
+        validate_config(cfg, stage)
+        prepare_lists(stage)
+        args = engine_args(cfg, stage)
+        staged_binary = stage / 'tpws'
+        atomic_write(staged_binary, contents[root / 'bin' / 'tpws'][0], 0o755)
+        args[0] = str(staged_binary)
+        run(args + ['--dry-run'])
+
+    affected = set(contents) | {root / 'config.json', root / 'installation.json'}
+    affected.update(root / 'runtime' / (name + '.txt')
+                    for name in ('general', 'google', 'excluded_hosts', 'ips', 'excluded_ips', 'excluded4', 'excluded6'))
+    previous = {path: (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
+                for path in affected}
+    created_dirs = [path for path in [root, *(root / folder for folder in folders)] if not path.exists()]
+    was_running = is_running(root)
     if root.exists():
         stop(root)
-    for folder in ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads'):
-        path = root / folder
-        if path.is_symlink():
-            raise Error('Каталог установки содержит символическую ссылку.')
-        path.mkdir(parents=True, exist_ok=True)
-    for name in ('zapret.py', 'discord_udp.py', 'voice_controller.py', 'strategies.json', 'VERSION', 'targets.txt'):
-        shutil.copyfile(source / name, root / name)
-        os.chmod(root / name, 0o644)
-    shutil.copyfile(binary, root / 'bin' / 'tpws')
-    os.chmod(root / 'bin' / 'tpws', 0o755)
-    shutil.copy2(source / 'payloads' / 'discord-fake.bin', root / 'payloads' / 'discord-fake.bin')
-    write_json(root / 'installation.json', dict(user_uid=original_user().pw_uid))
-    for path in (source / 'lists').iterdir():
-        if path.is_file() and not (root / 'lists' / path.name).exists():
-            shutil.copyfile(path, root / 'lists' / path.name)
-    for path in (source / 'licenses').iterdir():
-        if path.is_file():
-            shutil.copyfile(path, root / 'licenses' / path.name)
-    if not (root / 'config.json').exists():
-        write_json(root / 'config.json', DEFAULTS)
-    prepare_lists(root)
-    run(engine_args(config(root), root) + ['--dry-run'])
+    try:
+        for folder in folders:
+            (root / folder).mkdir(parents=True, exist_ok=True)
+        for dst, (content, mode) in contents.items():
+            atomic_write(dst, content, mode)
+        write_json(root / 'installation.json', dict(user_uid=user.pw_uid))
+        if not (root / 'config.json').exists():
+            write_json(root / 'config.json', DEFAULTS)
+        prepare_lists(root)
+        run(engine_args(config(root), root) + ['--dry-run'])
+    except BaseException as install_error:
+        def restore_file(path, saved):
+            if saved is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, saved[0], saved[1])
+
+        try:
+            cleanup_steps(*(lambda path=path, saved=saved: restore_file(path, saved)
+                            for path, saved in previous.items()))
+            for directory in reversed(created_dirs):
+                if directory.exists():
+                    directory.rmdir()
+            if was_running:
+                start(root)
+        except BaseException as rollback_error:
+            raise Error(f'Установка прервана: {install_error}. Восстановление предыдущей установки не завершено: {rollback_error}') from rollback_error
+        raise
     print('Установка завершена. Настройки предыдущей установки сохранены.')
 
 

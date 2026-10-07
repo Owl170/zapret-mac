@@ -111,9 +111,10 @@ def transmit(sock, data, payload, profile, inject):
     if inject and profile['repeats']:
         level, option = ((socket.IPPROTO_IP, socket.IP_TTL) if sock.family == socket.AF_INET
                          else (socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS))
-        original = sock.getsockopt(level, option) if profile['ttl'] else None
+        original = None
         try:
             if profile['ttl']:
+                original = sock.getsockopt(level, option)
                 sock.setsockopt(level, option, profile['ttl'])
             for _ in range(profile['repeats']):
                 try:
@@ -192,8 +193,13 @@ class Relay:
     def close_session(self, key):
         session = self.sessions.pop(key, None)
         if session:
-            self.selector.unregister(session['socket'])
-            session['socket'].close()
+            try:
+                self.selector.unregister(session['socket'])
+            except (KeyError, ValueError):
+                # A partial startup or a previous close may have unregistered it.
+                pass
+            finally:
+                session['socket'].close()
 
     def receive_client(self, listener):
         data, client = listener.recvfrom(65535)
@@ -293,22 +299,28 @@ class Relay:
         self.snapshot()
 
     def serve(self):
-        self.stats['ready'] = True
-        self.snapshot(True)
         try:
+            self.stats['ready'] = True
+            self.snapshot(True)
             while self.running:
                 self.step()
         finally:
             self.stats['ready'] = False
-            self.snapshot(True)
-            self.close()
+            try:
+                self.snapshot(True)
+            finally:
+                self.close()
 
     def close(self):
         for key in list(self.sessions):
             self.close_session(key)
         for listener in self.listeners:
-            self.selector.unregister(listener)
-            listener.close()
+            try:
+                self.selector.unregister(listener)
+            except (KeyError, ValueError):
+                pass
+            finally:
+                listener.close()
         self.listeners.clear()
         self.selector.close()
 
@@ -316,28 +328,38 @@ class Relay:
 def probe(address, token, timeout=3):
     family = socket.AF_INET6 if ':' in address else socket.AF_INET
     packet = TEST_PREFIX + bytes.fromhex(token)
-    with socket.socket(family, socket.SOCK_DGRAM) as client:
-        client.settimeout(timeout)
-        client.connect((address, TEST_PORT))
-        deadline = time.monotonic() + timeout
-        try:
-            client.send(packet)
-        except OSError as error:
-            if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
-                raise
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise Error('UDP-самопроверка не получила точный обратный ответ.')
-            client.settimeout(remaining)
+    phase = 'socket'
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as client:
+            phase = 'timeout'
+            client.settimeout(timeout)
+            phase = 'connect'
+            client.connect((address, TEST_PORT))
+            deadline = time.monotonic() + timeout
+            phase = 'send'
             try:
-                response = client.recv(4096)
-                break
+                client.send(packet)
             except OSError as error:
                 if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
                     raise
-        if response != packet:
-            raise Error('UDP-самопроверка получила неправильный ответ.')
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Error('UDP-самопроверка не получила точный обратный ответ.')
+                phase = 'timeout'
+                client.settimeout(remaining)
+                phase = 'recv'
+                try:
+                    response = client.recv(4096)
+                    break
+                except OSError as error:
+                    if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                        raise
+            if response != packet:
+                raise Error('UDP-самопроверка получила неправильный ответ.')
+            phase = 'close'
+    except OSError as error:
+        raise Error(f'UDP-самопроверка, этап {phase}, errno={error.errno}: {error}') from error
     print('UDP PF loop verified:', address)
 
 

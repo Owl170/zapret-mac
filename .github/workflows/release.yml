@@ -78,6 +78,9 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo 'publish=true' >> "$GITHUB_OUTPUT"
+      - name: Build and verify portable archive
+        if: steps.version.outputs.publish == 'true'
+        run: python3 scripts/package.py
       - name: Publish the tag at the version commit
         if: steps.version.outputs.publish == 'true' && steps.current.outputs.tag == ''
         uses: mathieudutour/github-tag-action@af99e60ce8132224b8e6ebab5023449fe256ed46 # v7.0.0
@@ -86,9 +89,6 @@ jobs:
           release_branches: '^main$'
           custom_tag: ${{ steps.version.outputs.number }}
           commit_sha: ${{ steps.version.outputs.sha }}
-      - name: Build and verify portable archive
-        if: steps.version.outputs.publish == 'true'
-        run: python3 scripts/package.py
       - name: Write release notes
         if: steps.version.outputs.publish == 'true'
         env:
