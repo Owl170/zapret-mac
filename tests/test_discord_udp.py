@@ -316,6 +316,7 @@ class ControllerTests(unittest.TestCase):
         def pf(*args, **kwargs):
             if args[0] == '-a':
                 applied.append(Path(args[-1]).read_text())
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         backend = v.Backend(self.root)
         with patch.object(v, 'clear_udp') as clear, patch('subprocess.Popen', side_effect=spawn), \
                 patch.object(z, 'pf', side_effect=pf), patch.object(v, 'user_uid', return_value=501), \
@@ -342,7 +343,7 @@ class ControllerTests(unittest.TestCase):
         with patch.object(v, 'clear_udp'), patch('subprocess.Popen', return_value=child), \
                 patch.object(z, 'pf') as pf:
             self.assertFalse(backend.start(dict(z.DEFAULTS, voice_udp=True), cancelled=lambda: True))
-        pf.assert_not_called()
+        self.assertFalse(any('-f' in call.args for call in pf.call_args_list))
         child.terminate.assert_called_once()
         self.assertIn('отменён', backend.error)
 

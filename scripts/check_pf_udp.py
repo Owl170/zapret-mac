@@ -42,6 +42,11 @@ try:
                 path = root / 'logs' / 'udp.log'
                 if path.exists():
                     print(path.read_text())
+                diagnostic = root / 'logs/udp-start-failure.json'
+                if diagnostic.exists():
+                    print(diagnostic.read_text())
+                print('lo0:', z.run(['/sbin/ifconfig', 'lo0'], check=False).stdout)
+                print('probe route:', z.run(['/sbin/route', '-n', 'get', v.TEST4], check=False).stdout)
                 raise SystemExit('FAIL: ' + backend.error)
             print(json.dumps(v.read_status(root), indent=2, ensure_ascii=False))
             print('PASS: non-root UDP → PF redirect → original destination lookup → reverse NAT reply.')

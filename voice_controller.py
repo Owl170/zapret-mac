@@ -74,6 +74,7 @@ class Backend:
         token = secrets.token_hex(16)
         z.atomic_write(self.root / 'runtime/udp-probe.json', json.dumps(dict(token=token)), 0o600)
         (self.root / 'runtime/udp-status.json').unlink(missing_ok=True)
+        rules_applied = False
         try:
             with (self.root / 'logs/udp.log').open('ab') as log:
                 self.child = subprocess.Popen([sys.executable, '-u', str(self.root / 'discord_udp.py'),
@@ -109,6 +110,7 @@ class Backend:
                 z.atomic_write(rules, udp_rules(cfg, self.root, ll, probe_only=True))
                 z.pf('-n', '-a', UDP_ANCHOR, '-f', rules)
             z.pf('-a', UDP_ANCHOR, '-f', rules)
+            rules_applied = True
             uid = user_uid(self.root)
             command = ['/usr/bin/sudo', '-u', '#' + str(uid), '--', sys.executable,
                        self.root / 'discord_udp.py', 'probe', '--token', token]
@@ -137,9 +139,34 @@ class Backend:
             return True
         except (z.Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
             self.error = str(error)
+            # Read only our failed probe's state; diagnostics must not delay cancellation.
+            if rules_applied and not cancelled():
+                try:
+                    self.capture_failure()
+                except (z.Error, OSError, ValueError):
+                    pass
             self.stop(preserve_error=True)
             print('UDP-перехват отключён: ' + self.error, flush=True)
             return False
+
+    def capture_failure(self):
+        import subprocess
+        diagnostic = dict(error=self.error, status=read_status(self.root))
+        for name, args in [('pf_info', ['-s', 'info']),
+                           ('udp_filter', ['-a', UDP_ANCHOR, '-v', '-s', 'rules']),
+                           ('udp_rdr', ['-a', UDP_ANCHOR, '-s', 'nat']),
+                           ('pf_interfaces', ['-v', '-s', 'Interfaces']),
+                           ('probe_states', ['-s', 'states'])]:
+            try:
+                result = z.pf(*args, check=False, timeout=2)
+                output = result.stdout or ''
+                if name == 'probe_states':
+                    output = '\n'.join(line for line in output.splitlines()
+                                       if TEST4 in line or TEST6 in line or ':989' in line)
+                diagnostic[name] = output[:8000]
+            except (z.Error, OSError, subprocess.TimeoutExpired):
+                diagnostic[name] = 'unavailable'
+        z.write_json(self.root / 'logs/udp-start-failure.json', diagnostic)
 
     def check(self):
         if self.active and self.child and self.child.poll() is not None:
