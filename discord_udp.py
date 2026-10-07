@@ -24,6 +24,7 @@ TEST6 = '2001:db8::feed'
 TEST_PREFIX = b'ZMAC-UDP-PROBE\x00'
 NATLOOK_SIZE = 84
 DIOCNATLOOK = 0xC0544417  # Darwin _IOWR('D', 23, pfioc_natlook), 84 bytes.
+UDP_VARIANT_APD = 1  # Apple PF_EXTFILTER_APD: address-port-dependent UDP state key.
 PROFILES = {
     'relay': dict(ttl=0, repeats=0),
     'fake': dict(ttl=0, repeats=6),
@@ -42,7 +43,7 @@ def natlook_buffer(client, local, family, direction=2):
     raw[16:16 + width] = socket.inet_pton(family, local[0].split('%')[0])
     struct.pack_into('!H', raw, 64, client[1])
     struct.pack_into('!H', raw, 68, local[1])
-    raw[80:84] = bytes((2 if family == socket.AF_INET else 30, socket.IPPROTO_UDP, 0, direction))
+    raw[80:84] = bytes((2 if family == socket.AF_INET else 30, socket.IPPROTO_UDP, UDP_VARIANT_APD, direction))
     return raw
 
 

@@ -8,3 +8,5 @@
 This package does not ship WinDivert, Windows executables, or Flowseal's batch files. The retained Flowseal license file describes those components in its original distribution.
 
 The local Python controller, UDP relay, launchers, documentation and tests are supplied under the root `LICENSE`. The NAT lookup wire layout follows the small PF compatibility header already bundled in upstream tpws; no XNU kernel implementation is bundled. Neither Flowseal nor bol-van is presented as the author or maintainer of this macOS controller.
+
+The UDP NAT lookup uses Apple's `PF_EXTFILTER_APD = 1` state-key discriminator, documented in the public [XNU PF definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pfvar.h) and [UDP state lookup](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pf.c). This is an interface constant; Apple kernel code is not bundled.

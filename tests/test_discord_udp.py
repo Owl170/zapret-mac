@@ -34,12 +34,12 @@ class PacketTests(unittest.TestCase):
         self.assertEqual(len(raw), 84)
         self.assertEqual(raw[:4], socket.inet_aton('192.168.1.5'))
         self.assertEqual(struct.unpack_from('!H', raw, 64)[0], 53000)
-        self.assertEqual(raw[80:], bytes((2, 17, 0, 2)))
+        self.assertEqual(raw[80:], bytes((2, 17, 1, 2)))
         raw[48:52] = socket.inet_aton('8.8.8.8')
         struct.pack_into('!H', raw, 76, 50001)
         self.assertEqual(u.natlook_result(raw, socket.AF_INET), ('8.8.8.8', 50001))
         raw6 = u.natlook_buffer(('2001:db8::1', 53000, 0, 0), ('fe80::1', 989, 0, 1), socket.AF_INET6)
-        self.assertEqual(raw6[80:], bytes((30, 17, 0, 2)))
+        self.assertEqual(raw6[80:], bytes((30, 17, 1, 2)))
 
     def test_fakes_precede_real_and_original_ttl_is_restored(self):
         sock = Mock(family=socket.AF_INET)
