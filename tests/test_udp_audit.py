@@ -1,5 +1,6 @@
 """Failure-path regressions found during the UDP/backend audit."""
 import errno
+import io
 import json
 from pathlib import Path
 import shutil
@@ -64,6 +65,37 @@ class RelayFailureTests(unittest.TestCase):
             with self.assertRaisesRegex(z.Error, r'connect, errno='):
                 u.probe(u.TEST4, '01' * 16)
         client.send.assert_not_called()
+
+    def test_debug_probe_still_rejects_wrong_echo_and_never_prints_token(self):
+        token = 'ae01' * 16
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.getsockname.return_value = ('192.0.2.1', 50001)
+        client.getpeername.return_value = (u.TEST4, u.TEST_PORT)
+        client.recv.return_value = b'wrong echo'
+        output = io.StringIO()
+        with patch.object(socket, 'socket', return_value=client), patch('sys.stderr', output):
+            with self.assertRaisesRegex(z.Error, 'неправильный ответ'):
+                u.probe(u.TEST4, token, debug=True)
+        client.connect.assert_called_once_with((u.TEST4, u.TEST_PORT))
+        client.send.assert_called_once_with(u.TEST_PREFIX + bytes.fromhex(token))
+        self.assertIn('before_connect', output.getvalue())
+        self.assertIn('after_recv', output.getvalue())
+        self.assertNotIn(token, output.getvalue())
+        self.assertNotIn('wrong echo', output.getvalue())
+
+    def test_debug_connect_error_has_original_traceback_without_sending(self):
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.connect.side_effect = OSError(errno.EHOSTUNREACH, 'no route')
+        output = io.StringIO()
+        with patch.object(socket, 'socket', return_value=client), patch('sys.stderr', output):
+            with self.assertRaisesRegex(z.Error, r'connect, errno='):
+                u.probe(u.TEST4, 'ae01' * 16, debug=True)
+        client.send.assert_not_called()
+        self.assertIn('Traceback', output.getvalue())
+        self.assertIn('client.connect((address, TEST_PORT))', output.getvalue())
+        self.assertNotIn('ae01' * 16, output.getvalue())
 
 
 class BackendFailureTests(unittest.TestCase):

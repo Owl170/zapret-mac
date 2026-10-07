@@ -155,6 +155,24 @@ class PackagingAuditTests(unittest.TestCase):
                 sync(self.root, '0.4.0')
         self.assertEqual(self.metadata(), before)
 
+    def test_interrupt_after_completed_rename_restores_previous_metadata(self):
+        before = self.metadata()
+        original = packaging.os.replace
+        interrupted = False
+
+        def interrupt_after_replace(source, target):
+            nonlocal interrupted
+            result = original(source, target)
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt('interrupted after rename')
+            return result
+
+        with patch.object(packaging.os, 'replace', interrupt_after_replace):
+            with self.assertRaises(KeyboardInterrupt):
+                sync(self.root, '0.4.0')
+        self.assertEqual(self.metadata(), before)
+
     def test_failed_zip_write_preserves_previous_archive_and_checksum(self):
         archive = packaging.package(self.root)
         checksum = Path(str(archive) + '.sha256')

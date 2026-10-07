@@ -46,7 +46,10 @@ def packet_trace(root, enabled):
         for child, output, path in captures:
             try:
                 if child.poll() is None:
-                    child.send_signal(signal.SIGINT)
+                    try:
+                        child.send_signal(signal.SIGINT)
+                    except ProcessLookupError:
+                        pass
                 try:
                     child.wait(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -56,7 +59,12 @@ def packet_trace(root, enabled):
                 failures.append(str(error))
             finally:
                 output.close()
+        # Output errors must not prevent stopping another capture process.
+        for child, output, path in captures:
+            try:
                 print(path.name + ':\n' + path.read_text(errors='replace')[:16000])
+            except OSError as error:
+                failures.append(str(error))
         if failures:
             print('Trace cleanup: ' + '; '.join(failures), file=sys.stderr)
 
@@ -66,6 +74,11 @@ def main(argv=None):
     parser.add_argument('--trace', action='store_true', help='Print bounded reserved-probe packet headers.')
     args = parser.parse_args(argv)
     z.require_mac(True)
+    if args.trace:
+        parent = Path('/Library/Application Support')
+        info = parent.stat()
+        print(f'Installation parent: uid={info.st_uid}, gid={info.st_gid}, '
+              f'mode={info.st_mode & 0o777:o}, path={parent}')
     if z.ROOT.exists() and z.is_running():
         raise SystemExit('Сначала остановите ZapretMac. Проверка не меняет активную установку.')
     if z.pf('-a', v.UDP_ANCHOR, '-sr').stdout.strip() or z.pf('-a', v.UDP_ANCHOR, '-sn').stdout.strip():
@@ -93,7 +106,7 @@ def main(argv=None):
             backend = v.Backend(root)
             with packet_trace(root, args.trace):
                 try:
-                    if not backend.start(cfg, probe_only=True):
+                    if not backend.start(cfg, probe_only=True, probe_debug=args.trace):
                         path = root / 'logs' / 'udp.log'
                         if path.exists():
                             print(path.read_text())

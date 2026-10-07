@@ -70,7 +70,7 @@ class Backend:
         z.write_json(self.root / 'runtime' / 'udp-mode.json',
                      dict(active=self.active, error=self.error, updated_at=time.time(), **extra))
 
-    def start(self, cfg, probe_only=False, cancelled=lambda: False):
+    def start(self, cfg, probe_only=False, cancelled=lambda: False, probe_debug=False):
         import subprocess
         self.stop()
         if not cfg['voice_udp']:
@@ -120,6 +120,8 @@ class Backend:
             uid = user_uid(self.root)
             command = ['/usr/bin/sudo', '-u', '#' + str(uid), '--', sys.executable,
                        self.root / 'discord_udp.py', 'probe', '--token', token]
+            if probe_debug:
+                command.append('--debug-probe')
             z.run(command + ['--address', TEST4], timeout=5)
             if cancelled():
                 raise z.Error('Запуск UDP отменён при остановке сервиса.')

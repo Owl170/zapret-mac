@@ -325,21 +325,53 @@ class Relay:
         self.selector.close()
 
 
-def probe(address, token, timeout=3):
+def probe(address, token, timeout=3, *, debug=False):
     family = socket.AF_INET6 if ':' in address else socket.AF_INET
     packet = TEST_PREFIX + bytes.fromhex(token)
     phase = 'socket'
+    debug_events = 0
+
+    def debug_event(event, client=None, error=None):
+        nonlocal debug_events
+        if not debug or debug_events >= 100:
+            return
+        debug_events += 1
+        details = dict(event=event, pid=os.getpid(), monotonic=time.monotonic(),
+                       address=address, family=int(family))
+        if client is not None:
+            for name, getter in [('local', client.getsockname), ('peer', client.getpeername)]:
+                try:
+                    details[name] = getter()
+                except OSError as lookup_error:
+                    details[name] = dict(errno=lookup_error.errno)
+        if error is not None:
+            details['errno'] = error.errno
+        print('UDP probe diagnostic: ' + json.dumps(details, default=str), file=sys.stderr, flush=True)
+
+    if debug:
+        import hashlib
+        details = dict(pid=os.getpid(), python=sys.version, executable=sys.executable,
+                       source=str(Path(__file__).resolve()),
+                       source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        print('UDP probe runtime: ' + json.dumps(details), file=sys.stderr, flush=True)
     try:
+        debug_event('before_socket')
         with socket.socket(family, socket.SOCK_DGRAM) as client:
+            debug_event('after_socket', client)
             phase = 'timeout'
             client.settimeout(timeout)
             phase = 'connect'
+            debug_event('before_connect', client)
             client.connect((address, TEST_PORT))
+            debug_event('after_connect', client)
             deadline = time.monotonic() + timeout
             phase = 'send'
+            debug_event('before_send', client)
             try:
                 client.send(packet)
+                debug_event('after_send', client)
             except OSError as error:
+                debug_event('send_error', client, error)
                 if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
                     raise
             while True:
@@ -349,16 +381,23 @@ def probe(address, token, timeout=3):
                 phase = 'timeout'
                 client.settimeout(remaining)
                 phase = 'recv'
+                debug_event('before_recv', client)
                 try:
                     response = client.recv(4096)
+                    debug_event('after_recv', client)
                     break
                 except OSError as error:
+                    debug_event('recv_error', client, error)
                     if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
                         raise
             if response != packet:
                 raise Error('UDP-самопроверка получила неправильный ответ.')
             phase = 'close'
+            debug_event('before_close', client)
     except OSError as error:
+        if debug:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         raise Error(f'UDP-самопроверка, этап {phase}, errno={error.errno}: {error}') from error
     print('UDP PF loop verified:', address)
 
@@ -369,12 +408,13 @@ def main():
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--address', default=TEST4)
     parser.add_argument('--token', default='')
+    parser.add_argument('--debug-probe', action='store_true', help='Log probe socket stages without packet contents.')
     args = parser.parse_args()
     if args.command == 'abi':
         print(json.dumps(dict(size=NATLOOK_SIZE, request=DIOCNATLOOK, sport=64, dport=68, rdport=76, af=80)))
         return
     if args.command == 'probe':
-        probe(args.address, args.token)
+        probe(args.address, args.token, debug=args.debug_probe)
         return
     cfg = config(args.root)
     payload = (args.root / 'payloads' / 'discord-fake.bin').read_bytes()

@@ -76,6 +76,27 @@ class NativeAuditTests(unittest.TestCase):
             child.wait.assert_called_once_with(timeout=3)
             self.assertTrue(all(output.closed for output in outputs))
 
+    def test_trace_read_failure_does_not_orphan_another_capture(self):
+        children = [Mock(), Mock()]
+        for child in children:
+            child.poll.return_value = None
+        outputs = []
+        def spawn(*args, **kwargs):
+            outputs.append(kwargs['stdout'])
+            return children[len(outputs) - 1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'logs').mkdir()
+            with patch.object(check.z, 'run', return_value=SimpleNamespace(stdout='interface: en0\n')), \
+                    patch.object(check.subprocess, 'Popen', side_effect=spawn), \
+                    patch.object(Path, 'read_text', side_effect=OSError('trace unavailable')), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with check.packet_trace(root, True):
+                    pass
+            for child, output in zip(children, outputs):
+                child.wait.assert_called_once_with(timeout=3)
+                self.assertTrue(output.closed)
+
 
 if __name__ == '__main__':
     unittest.main()

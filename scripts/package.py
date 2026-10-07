@@ -75,8 +75,10 @@ def replace_files(contents):
             backups[path] = temporary(path, path.read_bytes(), modes[path]) if path.exists() else None
             staged[path] = temporary(path, data, modes[path])
         for path, temporary_path in staged.items():
-            os.replace(temporary_path, path)
+            # A signal may interrupt Python after the rename already completed.
+            # Include the attempt in rollback before calling into the filesystem.
             committed.append(path)
+            os.replace(temporary_path, path)
     except BaseException as error:
         for path in reversed(committed):
             try:
