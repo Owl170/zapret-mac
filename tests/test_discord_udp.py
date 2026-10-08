@@ -146,12 +146,21 @@ class RealDatagramTests(unittest.TestCase):
         self.assertFalse(self.thread.is_alive())
         self.assertEqual(self.errors, [])
 
+    def finish_relay(self):
+        # Receipt of a datagram can precede the relay's post-send counters.
+        # Join the worker before asserting final metrics from a completed test.
+        self.relay.running = False
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.errors, [])
+
     def test_bidirectional_bytes_and_stable_nat_mapping(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
             client.settimeout(2)
             for data in [b'\x80\x78encrypted-voice', bytes(range(256)) * 4, b'']:
                 client.sendto(data, self.listen)
                 self.assertEqual(client.recvfrom(65535)[0], data)
+        self.finish_relay()
         self.assertEqual(len(set(self.peers)), 1)
         self.assertEqual(self.relay.stats['forwarded'], 3)
         self.assertEqual(self.relay.stats['replies'], 3)
@@ -176,6 +185,7 @@ class RealDatagramTests(unittest.TestCase):
             client.sendto(b'wrong-token', self.listen)
             client.sendto(packet, self.listen)
             self.assertEqual(client.recvfrom(4096)[0], packet)
+        self.finish_relay()
         self.assertEqual(self.relay.stats['probes4'], 1)
         self.assertEqual(self.relay.stats['forwarded'], 0)
         self.assertEqual(self.peers, [])

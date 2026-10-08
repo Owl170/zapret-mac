@@ -58,7 +58,10 @@ def packet_trace(root, enabled):
             except (OSError, subprocess.TimeoutExpired) as error:
                 failures.append(str(error))
             finally:
-                output.close()
+                try:
+                    output.close()
+                except OSError as error:
+                    failures.append(str(error))
         # Output errors must not prevent stopping another capture process.
         for child, output, path in captures:
             try:

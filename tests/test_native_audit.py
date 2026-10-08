@@ -97,6 +97,39 @@ class NativeAuditTests(unittest.TestCase):
                 child.wait.assert_called_once_with(timeout=3)
                 self.assertTrue(output.closed)
 
+    def test_trace_output_close_failure_does_not_orphan_another_capture(self):
+        children = [Mock(), Mock()]
+        for child in children:
+            child.poll.return_value = None
+        real_open = Path.open
+        outputs = []
+
+        class BrokenClose:
+            def __init__(self, output):
+                self.output = output
+
+            def close(self):
+                self.output.close()
+                raise OSError('trace close failed')
+
+        def open_output(path, *args, **kwargs):
+            output = real_open(path, *args, **kwargs)
+            outputs.append(output)
+            return BrokenClose(output) if len(outputs) == 1 else output
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'logs').mkdir()
+            with patch.object(check.z, 'run', return_value=SimpleNamespace(stdout='interface: en0\n')), \
+                    patch.object(check.subprocess, 'Popen', side_effect=children), \
+                    patch.object(Path, 'open', side_effect=open_output, autospec=True), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with check.packet_trace(root, True):
+                    pass
+            for child in children:
+                child.wait.assert_called_once_with(timeout=3)
+            self.assertTrue(all(output.closed for output in outputs))
+
 
 if __name__ == '__main__':
     unittest.main()

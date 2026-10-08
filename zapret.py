@@ -37,7 +37,7 @@ DEFAULTS = dict(strategy='split', game_filter=False, game_tcp='1024-65535',
                 ipset='loaded', quic_fallback=False, ipv6=True, auto_update_check=False,
                 voice_udp=False, voice_profile='fake', voice_ports='3478,5349,19294-19344,50000-65535')
 BASE_PORTS = '80,443,2053,2083,2087,2096,8443'
-PRIVATE4 = ['0.0.0.0/8', '10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16',
+PRIVATE4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
             '172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4']
 PRIVATE6 = ['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8']
 LIST_FILES = ['list-general.txt', 'list-google.txt', 'list-exclude.txt',
@@ -101,7 +101,7 @@ def strategies(root=ROOT):
 
 
 def ports(value):
-    if not isinstance(value, str) or not re.fullmatch(r'\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*', value):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*', value):
         raise Error('Порты: например, 1024-1934,1936-65535.')
     for item in value.split(','):
         pair = [int(n) for n in item.split('-')]
@@ -296,21 +296,34 @@ def release_pf(root=ROOT):
 
 
 def ensure_pf_hooks():
+    def check_loopback():
+        # set skip is an interface flag, not a filter/NAT rule. Reading only
+        # -sr/-sn misses active configurations which bypass our lo0 rdr rules.
+        interfaces = pf('-v', '-s', 'Interfaces').stdout
+        if re.search(r'^\s*lo0\s+\(skip\)(?:\s|$)', interfaces, re.M):
+            raise Error('Активный PF пропускает lo0 (set skip on lo0); прозрачный обход невозможен.')
+
     active_filter = pf('-sr').stdout
     active_rdr = pf('-sn').stdout
-    hook = '"com.apple/*"'
-    if hook in active_filter and hook in active_rdr:
+    filter_hook = re.search(r'^[ \t]*anchor[ \t]+"com\.apple/\*"[ \t]+all[ \t]*$', active_filter, re.M)
+    rdr_hook = re.search(r'^[ \t]*rdr-anchor[ \t]+"com\.apple/\*"[ \t]+all[ \t]*$', active_rdr, re.M)
+    if filter_hook and rdr_hook:
+        check_loopback()
         return
     if active_filter.strip() or active_rdr.strip():
         raise Error('Активный PF не содержит стандартных com.apple/* hooks. '
                     'Проверьте вашу конфигурацию PF; её правила не заменены.')
     main = Path('/etc/pf.conf').read_text()
-    if not re.search(r'^\s*rdr-anchor\s+"com\.apple/\*"', main, re.M) or not re.search(r'^\s*anchor\s+"com\.apple/\*"', main, re.M):
-        raise Error('/etc/pf.conf не содержит стандартных com.apple/* hooks.')
+    source_rules = {' '.join(line.split('#', 1)[0].split()) for line in main.splitlines()}
+    if any(not source_rules.intersection({f'{kind} "com.apple/*"', f'{kind} "com.apple/*" all'})
+           for kind in ('anchor', 'rdr-anchor')):
+        raise Error('/etc/pf.conf не содержит стандартных com.apple/* hooks без ограничений.')
     if re.search(r'^\s*set\s+skip\s+on\s+.*\blo0\b', main, re.M):
         raise Error('set skip on lo0 в pf.conf несовместим с прозрачным обходом.')
     pf('-n', '-f', '/etc/pf.conf')
     pf('-f', '/etc/pf.conf')
+    # Macros and multiline interface lists can hide skip flags in source text.
+    check_loopback()
 
 
 def apply_pf(cfg, root=ROOT):
@@ -449,10 +462,27 @@ def wait_ready(child, timeout=15):
             raise Error('tpws завершился до запуска. Посмотрите logs/service.log.')
         try:
             with socket.create_connection(('127.0.0.1', 988), timeout=0.15):
-                return
+                pass
         except OSError:
             time.sleep(0.15)
-    raise Error('tpws не открыл порт 988 за 15 секунд.')
+            continue
+        # A pre-existing listener can accept this connection while tpws is
+        # still reporting its bind failure. Do not route PF into another PID.
+        listeners = run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(child.pid),
+                         '-iTCP:988', '-sTCP:LISTEN', '-Fpn'], check=False, timeout=2)
+        if child.poll() is not None:
+            raise Error('tpws завершился до запуска. Посмотрите logs/service.log.')
+        if listeners.returncode not in (0, 1):
+            raise Error('Не удалось проверить владельца TCP-порта 988: '
+                        + listeners.stderr.strip())
+        owner = None
+        for line in listeners.stdout.splitlines():
+            if line.startswith('p'):
+                owner = line[1:]
+            elif listeners.returncode == 0 and owner == str(child.pid) and line == 'n127.0.0.1:988':
+                return
+        time.sleep(0.15)
+    raise Error('tpws не подтвердил собственный TCP listener 127.0.0.1:988 вовремя.')
 
 
 def supervise(root=ROOT):
@@ -677,7 +707,8 @@ def update_lists(root=ROOT):
         value = entries(download(FLOW_URL + remote), 'ip' if name.startswith('ipset') else 'host')
         pending[name] = '\n'.join(value) + '\n'
     backup = root / 'backups' / ('lists-' + stamp())
-    backup.mkdir(parents=True)
+    # Rollback reads these files as root; other users must not replace them.
+    backup.mkdir(mode=0o700, parents=True)
     for name in pending:
         shutil.copy2(root / 'lists' / name, backup / name)
     attempted = []
@@ -790,6 +821,9 @@ def clean_discord_cache(root=ROOT):
     running = run(['/usr/bin/pgrep', '-u', str(user.pw_uid), '-if', '/Discord[^/]*/.*MacOS|/Discord[^/]*/.*Helper'], check=False)
     if running.returncode == 0:
         raise Error('Полностью закройте Discord перед очисткой кеша.')
+    if running.returncode != 1:
+        raise Error('Не удалось проверить, закрыт ли Discord; кеш сохранён. '
+                    + getattr(running, 'stderr', '').strip())
     base = Path(user.pw_dir) / 'Library' / 'Application Support'
     moved = 0
     for name in ('discord', 'discordcanary', 'discordptb'):
@@ -1166,6 +1200,9 @@ def main():
 
 
 if __name__ == '__main__':
+    # Voice modules import zapret. Reuse this executable module so their Error
+    # class and controller state remain identical to the CLI's own objects.
+    sys.modules['zapret'] = sys.modules[__name__]
     try:
         main()
     except (Error, OSError, ValueError, subprocess.TimeoutExpired, urllib.error.URLError) as error:

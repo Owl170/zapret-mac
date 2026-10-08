@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 import zipfile
 
@@ -172,6 +174,62 @@ class PackagingAuditTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 sync(self.root, '0.4.0')
         self.assertEqual(self.metadata(), before)
+
+    def test_interrupt_during_rollback_preserves_rescue_and_restores_other_files(self):
+        before = self.metadata()
+        original = packaging.os.replace
+        calls = 0
+
+        def fail_and_interrupt_rollback(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise KeyboardInterrupt('interrupted rollback')
+            result = original(source, target)
+            if calls == 2:
+                raise OSError('write failed after rename')
+            return result
+
+        with patch.object(packaging.os, 'replace', fail_and_interrupt_rollback):
+            with self.assertRaisesRegex(RuntimeError, 'recovery files retained') as raised:
+                sync(self.root, '0.4.0')
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+        self.assertEqual((self.root / 'VERSION').read_bytes(), before['VERSION'])
+        backups = list(self.root.glob('.README.md.*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), before['README.md'])
+        self.assertNotEqual((self.root / 'README.md').read_bytes(), before['README.md'])
+
+    def test_cleanup_interrupt_does_not_mask_write_error_or_skip_other_cleanup(self):
+        before = self.metadata()
+        original_unlink = Path.unlink
+        interrupted = False
+
+        def interrupt_cleanup_once(path, *args, **kwargs):
+            nonlocal interrupted
+            if path.name.startswith('.VERSION.') and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt('interrupted cleanup')
+            return original_unlink(path, *args, **kwargs)
+
+        original_replace = packaging.os.replace
+        failed = False
+
+        def fail_write_once(source, target):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError('original write failure')
+            return original_replace(source, target)
+
+        with patch.object(packaging.os, 'replace', fail_write_once), \
+                patch.object(Path, 'unlink', interrupt_cleanup_once), redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(OSError, 'original write failure'):
+                sync(self.root, '0.4.0')
+        self.assertEqual(self.metadata(), before)
+        leftovers = [path for path in self.root.iterdir() if path.name.startswith(('.VERSION.', '.README.md.', '.VOICE.md.', '.PROVENANCE.json.'))]
+        self.assertEqual(len(leftovers), 1)
+        self.assertTrue(leftovers[0].name.startswith('.VERSION.'))
 
     def test_failed_zip_write_preserves_previous_archive_and_checksum(self):
         archive = packaging.package(self.root)

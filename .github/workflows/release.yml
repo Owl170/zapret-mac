@@ -13,7 +13,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  native:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/macos-check.yml
+    permissions:
+      contents: read
   release:
+    needs: native
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15

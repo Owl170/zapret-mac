@@ -3,6 +3,8 @@
 import itertools
 from pathlib import Path
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 
@@ -39,4 +41,36 @@ with tempfile.TemporaryDirectory(prefix='zapret-native-check-') as temp:
         tcp_anchor = root / 'runtime/voice-tcp-anchor.conf'
         z.atomic_write(tcp_anchor, z.pf_rules(cfg, root))
         z.pf('-n', '-a', z.ANCHOR, '-f', tcp_anchor)
+    # Exercise production readiness with the actual macOS lsof field format.
+    # Refuse to disturb a pre-existing listener; only this child is terminated.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        try:
+            reserved.bind(('127.0.0.1', 988))
+        except OSError as error:
+            raise z.Error('Native readiness check needs free TCP 127.0.0.1:988.') from error
+    ready_log = root / 'runtime/readiness.log'
+    with ready_log.open('wb') as log:
+        child = subprocess.Popen(z.engine_args(dict(z.DEFAULTS, ipv6=False), root),
+                                 stdout=log, stderr=log)
+        try:
+            z.wait_ready(child)
+        except BaseException:
+            log.flush()
+            print(ready_log.read_text(encoding='utf-8', errors='replace'), file=sys.stderr)
+            raise
+        finally:
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                except ProcessLookupError:
+                    pass
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    child.kill()
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+    print('PASS: production TCP readiness verified the engine PID owns 127.0.0.1:988.')
     print(f'PASS: {count + 4} engine configurations and 16 PF syntax checks. No rules applied.')
