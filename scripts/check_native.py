@@ -44,6 +44,9 @@ with tempfile.TemporaryDirectory(prefix='zapret-native-check-') as temp:
     # Exercise production readiness with the actual macOS lsof field format.
     # Refuse to disturb a pre-existing listener; only this child is terminated.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        # Match tpws so TIME_WAIT from preceding transport checks is reusable.
+        # An active listener still prevents this bind.
+        reserved.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             reserved.bind(('127.0.0.1', 988))
         except OSError as error:

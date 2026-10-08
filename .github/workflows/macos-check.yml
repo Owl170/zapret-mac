@@ -7,7 +7,11 @@ permissions:
   contents: read
 jobs:
   native:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -19,10 +23,15 @@ jobs:
         run: |
           clang -std=gnu99 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Iengine/tpws -Iengine/tpws/macos native/protocol_fuzz.c engine/tpws/protocol.c engine/tpws/helpers.c -o /tmp/zmac-protocol-fuzz
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 /tmp/zmac-protocol-fuzz
+      - name: Verify socket address copies under sanitizers
+        run: |
+          clang -std=gnu99 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Iengine/tpws -Iengine/tpws/macos native/address_copy_check.c engine/tpws/helpers.c -o /tmp/zmac-address-copy
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 /tmp/zmac-address-copy
       - name: Verify HTTP and TLS transport for every strategy under sanitizers
         run: |
           clang -std=gnu99 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-address-of-packed-member -Iengine/tpws/epoll-shim/include -Iengine/tpws/macos engine/tpws/*.c engine/tpws/epoll-shim/src/*.c -lz -lpthread -o /tmp/zmac-tpws-sanitized
           sudo python3 scripts/check_engine_transport.py /tmp/zmac-tpws-sanitized
+          sudo python3 scripts/check_engine_transport.py /tmp/zmac-tpws-sanitized --transparent
       - name: Validate actual engine options and PF syntax
         run: sudo python3 scripts/check_native.py engine/tpws/tpws
       - name: Validate PF ABI

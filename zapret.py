@@ -460,14 +460,9 @@ def wait_ready(child, timeout=15):
     while time.monotonic() < end:
         if child.poll() is not None:
             raise Error('tpws завершился до запуска. Посмотрите logs/service.log.')
-        try:
-            with socket.create_connection(('127.0.0.1', 988), timeout=0.15):
-                pass
-        except OSError:
-            time.sleep(0.15)
-            continue
-        # A pre-existing listener can accept this connection while tpws is
-        # still reporting its bind failure. Do not route PF into another PID.
+        # Inspect the listening socket without creating a direct connection.
+        # A root connection has no PF NAT state and makes transparent tpws log
+        # a misleading DIOCNATLOOK error during otherwise successful startup.
         listeners = run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(child.pid),
                          '-iTCP:988', '-sTCP:LISTEN', '-Fpn'], check=False, timeout=2)
         if child.poll() is not None:
