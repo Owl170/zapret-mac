@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 from html.parser import HTMLParser
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -32,6 +33,14 @@ class ProbeError(Exception):
     pass
 
 
+class TransferError(ProbeError):
+    def __init__(self, message, response, received):
+        super().__init__(f'{message}; получено {received} байт' +
+                         (f' из {response.length + received}' if response.length is not None else ''))
+        self.http = str(response.status)
+        self.tls_reached = True
+
+
 def remaining(deadline):
     value = deadline - time.monotonic()
     if value <= 0:
@@ -43,6 +52,8 @@ def family_socket(address, timeout, source_address, family, trace):
     error = None
     for af, kind, protocol, _, target in socket.getaddrinfo(address[0], address[1],
                                                           family, socket.SOCK_STREAM):
+        if af != family or (family == socket.AF_INET6 and ipaddress.ip_address(target[0]).ipv4_mapped):
+            continue  # macOS can synthesize ::ffff:IPv4; it is not native IPv6.
         sock = None
         try:
             sock = socket.socket(af, kind, protocol)
@@ -61,14 +72,23 @@ def family_socket(address, timeout, source_address, family, trace):
     raise OSError('DNS не вернул адресов выбранного семейства')
 
 
-def fetch(url, limit, prefix=False, family=None, trace=None):
+def fetch(url, limit, prefix=False, family=None, trace=None, app_ip=None):
     parsed = urlsplit(url)
     hosts = (UPDATE_HOST,) if prefix else ('discord.com', 'updates.discord.com')
     if parsed.scheme != 'https' or parsed.netloc not in hosts or parsed.fragment:
         raise ProbeError('Неподдерживаемый адрес проверки')
     deadline = time.monotonic() + 20
     conn = http.client.HTTPSConnection(parsed.netloc, timeout=5, context=ssl.create_default_context())
-    if family is not None:
+    if app_ip is not None:
+        address = ipaddress.ip_address(app_ip)
+        if parsed.netloc != 'discord.com' or prefix or address.version != 4 or not address.is_global:
+            raise ProbeError('Для страницы Discord нужен публичный IPv4')
+        addresses = trace if trace is not None else []
+        def connect_endpoint(target, timeout, source_address):
+            addresses.append(str(address))
+            return socket.create_connection((str(address), target[1]), timeout, source_address)
+        conn._create_connection = connect_endpoint
+    elif family is not None:
         if family not in (4, 6):
             raise ProbeError('Для проверки нужен IPv4 или IPv6')
         af = socket.AF_INET if family == 4 else socket.AF_INET6
@@ -78,6 +98,7 @@ def fetch(url, limit, prefix=False, family=None, trace=None):
         conn._create_connection = lambda address, timeout, source_address: family_socket(
             address, timeout, source_address, af, addresses)
     response = None
+    result = bytearray()
     try:
         headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity', 'Connection': 'close'}
         if prefix:
@@ -95,7 +116,6 @@ def fetch(url, limit, prefix=False, family=None, trace=None):
                 raise ProbeError('Сервер не подтвердил запрошенную часть файла обновления')
         if length is not None and length > limit:
             raise ProbeError('Ответ превышает лимит проверки')
-        result = bytearray()
         while True:
             # read1 returns available data, so the deadline also bounds slow streams.
             if conn.sock is not None:
@@ -111,6 +131,10 @@ def fetch(url, limit, prefix=False, family=None, trace=None):
         if length is not None and len(result) != length:
             raise ProbeError(f'Ответ загружен не полностью: {len(result)}/{length} байт')
         return bytes(result), response.getheader('Content-Type', '').split(';')[0].lower()
+    except (OSError, http.client.HTTPException, ProbeError) as error:
+        if response is not None:
+            raise TransferError(str(error), response, len(result)) from None
+        raise
     finally:
         if response is not None:
             response.close()
@@ -133,17 +157,17 @@ def row(name, url, operation, code='200'):
     try:
         operation()
     except (OSError, ValueError, http.client.HTTPException, ProbeError) as error:
-        return dict(name=name, url=url, http='---', seconds=f'{time.monotonic()-start:.3f}',
-                    tls_reached=False, application_ok=False, error=str(error))
+        return dict(name=name, url=url, http=getattr(error, 'http', '---'), seconds=f'{time.monotonic()-start:.3f}',
+                    tls_reached=getattr(error, 'tls_reached', False), application_ok=False, error=str(error))
     return dict(name=name, url=url, http=code, seconds=f'{time.monotonic()-start:.3f}',
                 tls_reached=True, application_ok=True, error='')
 
 
-def app_checks(family=None):
+def app_checks(family=None, app_ip=None):
     scripts = Scripts()
     page_ips, script_ips = [], []
     def app():
-        data, kind = fetch(APP, 2 * 1024 * 1024, family=family, trace=page_ips)
+        data, kind = fetch(APP, 2 * 1024 * 1024, family=family, trace=page_ips, app_ip=app_ip)
         text = data.decode('utf-8')
         if kind != 'text/html' or '</html>' not in text.lower():
             raise ProbeError('Неполная HTML-страница приложения')
@@ -161,7 +185,7 @@ def app_checks(family=None):
         return [page, skipped]
     script = scripts.urls[0]
     def asset():
-        data, kind = fetch(script, 8 * 1024 * 1024, family=family, trace=script_ips)
+        data, kind = fetch(script, 8 * 1024 * 1024, family=family, trace=script_ips, app_ip=app_ip)
         if kind not in ('application/javascript', 'text/javascript', 'application/x-javascript') or not data.strip():
             raise ProbeError('Вместо JavaScript получен другой или пустой ответ')
     result = row(CHECKS[1], script, asset)
@@ -349,6 +373,17 @@ def probes():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] not in ([], ['--families']):
-        raise SystemExit('Usage: discord_probe.py [--families]')
-    print(json.dumps(app_family_checks() if sys.argv[1:] else probes(), ensure_ascii=False))
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == '--app-ip':
+        try:
+            address = ipaddress.ip_address(args[1])
+            if address.version != 4 or not address.is_global:
+                raise ValueError('Для страницы Discord нужен публичный IPv4')
+        except ValueError as error:
+            raise SystemExit(str(error))
+        results = app_checks(app_ip=str(address))
+    elif args in ([], ['--families']):
+        results = app_family_checks() if args else probes()
+    else:
+        raise SystemExit('Usage: discord_probe.py [--families | --app-ip IPv4]')
+    print(json.dumps(results, ensure_ascii=False))

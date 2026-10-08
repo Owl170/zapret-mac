@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 import zapret as z
 from discord_udp import TEST4
 
-BODY = b'ZAPRETMAC_TRANSPORT_OK'
+BODY = b'ZAPRETMAC_TRANSPORT_OK' * 100000  # Exercise multi-record replies and backpressure.
 ANCHOR = 'com.apple/zapret-macos-tcp-check'
 
 
@@ -100,12 +100,13 @@ def exchange_http(client, secure, certificate):
     with stream:
         stream.sendall(b'GET /probe HTTP/1.1\r\nHost: www.example.invalid\r\nConnection: close\r\n\r\n')
         received = bytearray()
-        while len(received) < 16384:
+        while len(received) <= len(BODY) + 16384:
             chunk = stream.recv(4096)
             if not chunk:
                 break
             received.extend(chunk)
-        if not bytes(received).endswith(b'\r\n\r\n' + BODY):
+        header, separator, body = bytes(received).partition(b'\r\n\r\n')
+        if not separator or not header.startswith(b'HTTP/1.1 200 OK\r\n') or body != BODY:
             raise RuntimeError('Response did not arrive intact')
 
 
