@@ -224,7 +224,8 @@ class DestinationLookupTests(unittest.TestCase):
         resolver.ioctl.assert_called_once()
 
     def test_relay_fails_closed_on_ambiguous_destination(self):
-        relay = u.Relay(Mock(side_effect=OSError(errno.E2BIG, 'two matching states')), profile='relay')
+        relay = u.Relay(Mock(side_effect=OSError(errno.E2BIG, 'two matching states')),
+                        profile='relay', allow_local_test=True)
         self.addCleanup(relay.close)
         address = relay.listen(('127.0.0.1', 0))
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:

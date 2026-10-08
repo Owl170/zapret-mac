@@ -15,7 +15,7 @@ UDP_ANCHOR = 'com.apple/zapret-macos-udp'
 
 
 def clear_udp():
-    z.pf('-a', UDP_ANCHOR, '-f', '-', input='', check=False)
+    z.pf('-a', UDP_ANCHOR, '-f', '-', input='')
 
 
 def udp_rules(cfg, root=z.ROOT, linklocal='fe80::1', probe_only=False):
@@ -48,11 +48,14 @@ def user_uid(root):
         return z.original_user().pw_uid
     except z.Error:
         installed = json.loads((root / 'installation.json').read_text())
-        uid = installed['user_uid']
-        if not isinstance(uid, int) or uid < 1:
+        uid = installed.get('user_uid') if isinstance(installed, dict) else None
+        if type(uid) is not int or not 1 <= uid <= 0xFFFFFFFE:
             raise z.Error('Не сохранён пользователь установки для UDP-самопроверки.')
         import pwd
-        pwd.getpwuid(uid)
+        try:
+            pwd.getpwuid(uid)
+        except KeyError as error:
+            raise z.Error('Пользователь установки больше не существует; переустановите ZapretMac.') from error
         return uid
 
 
@@ -67,16 +70,16 @@ class Backend:
         z.write_json(self.root / 'runtime' / 'udp-mode.json',
                      dict(active=self.active, error=self.error, updated_at=time.time(), **extra))
 
-    def start(self, cfg, probe_only=False, cancelled=lambda: False):
+    def start(self, cfg, probe_only=False, cancelled=lambda: False, probe_debug=False):
         import subprocess
         self.stop()
         if not cfg['voice_udp']:
             return False
         token = secrets.token_hex(16)
-        z.atomic_write(self.root / 'runtime/udp-probe.json', json.dumps(dict(token=token)), 0o600)
-        (self.root / 'runtime/udp-status.json').unlink(missing_ok=True)
         rules_applied = False
         try:
+            z.atomic_write(self.root / 'runtime/udp-probe.json', json.dumps(dict(token=token)), 0o600)
+            (self.root / 'runtime/udp-status.json').unlink(missing_ok=True)
             with (self.root / 'logs/udp.log').open('ab') as log:
                 self.child = subprocess.Popen([sys.executable, '-u', str(self.root / 'discord_udp.py'),
                                                'serve', '--root', str(self.root)], stdout=log, stderr=log)
@@ -88,6 +91,8 @@ class Backend:
                 path = self.root / 'runtime/udp-status.json'
                 if path.exists():
                     status = json.loads(path.read_text())
+                    if not isinstance(status, dict):
+                        raise z.Error('Некорректный файл готовности UDP-relay.')
                     if status.get('pid') == self.child.pid and status.get('ready'):
                         break
                 time.sleep(0.1)
@@ -115,17 +120,36 @@ class Backend:
             uid = user_uid(self.root)
             command = ['/usr/bin/sudo', '-u', '#' + str(uid), '--', sys.executable,
                        self.root / 'discord_udp.py', 'probe', '--token', token]
+            if probe_debug:
+                command.append('--debug-probe')
             z.run(command + ['--address', TEST4], timeout=5)
             if cancelled():
                 raise z.Error('Запуск UDP отменён при остановке сервиса.')
             ipv6_probe = 'disabled'
+            ipv6_error = ''
             if cfg['ipv6']:
                 route = z.run(['/sbin/route', '-n', 'get', '-inet6', 'default'], check=False)
                 if route.returncode == 0:
-                    z.run(command + ['--address', TEST6], timeout=5)
-                    ipv6_probe = 'passed'
+                    try:
+                        z.run(command + ['--address', TEST6], timeout=5)
+                        ipv6_probe = 'passed'
+                    except (z.Error, OSError, subprocess.TimeoutExpired) as error:
+                        ipv6_probe = 'failed'
+                        ipv6_error = str(error)
                 else:
                     ipv6_probe = 'no-default-route'
+            if cancelled():
+                raise z.Error('Запуск UDP отменён при остановке сервиса.')
+            if self.child.poll() is not None:
+                raise z.Error('UDP-relay завершился во время самопроверки.')
+            if cfg['ipv6'] and ipv6_probe != 'passed':
+                # A default route alone does not prove usable IPv6 UDP. Keep the
+                # verified IPv4 path, and remove every unverified IPv6 rule first.
+                active_cfg = dict(cfg, ipv6=False)
+                text = udp_rules(active_cfg, self.root, ll, probe_only=probe_only)
+                z.atomic_write(rules, udp_rules(active_cfg, self.root, ll, probe_only=True))
+                z.pf('-n', '-a', UDP_ANCHOR, '-f', rules)
+                z.pf('-a', UDP_ANCHOR, '-f', rules)
             if cancelled():
                 raise z.Error('Запуск UDP отменён при остановке сервиса.')
             if self.child.poll() is not None:
@@ -135,8 +159,11 @@ class Backend:
                 z.pf('-a', UDP_ANCHOR, '-f', rules)
             self.active = True
             self.error = ''
-            self.record(profile=cfg['voice_profile'], ipv4_probe='passed', ipv6_probe=ipv6_probe)
-            print('UDP-самопроверка пройдена. Режим голоса:', cfg['voice_profile'], flush=True)
+            self.record(profile=cfg['voice_profile'], ipv4_probe='passed', ipv6_probe=ipv6_probe,
+                        ipv6_error=ipv6_error, ipv4_active=True, ipv6_active=ipv6_probe == 'passed')
+            print('UDP IPv4 PF-самопроверка пройдена. Режим голоса:', cfg['voice_profile'], flush=True)
+            if cfg['ipv6'] and ipv6_probe != 'passed':
+                print('UDP IPv6 отключён: ' + (ipv6_error or 'нет маршрута IPv6 по умолчанию.'), flush=True)
             return True
         except (z.Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
             self.error = str(error)
@@ -177,27 +204,46 @@ class Backend:
 
     def stop(self, preserve_error=False):
         import subprocess
-        clear_udp()
         self.active = False
-        if self.child and self.child.poll() is None:
-            self.child.terminate()
-            try:
-                self.child.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait()
-        self.child = None
-        if not preserve_error:
-            self.error = ''
-        self.record()
+
+        def close_child():
+            if self.child:
+                child = self.child
+                if child.poll() is None:
+                    try:
+                        child.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        child.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            child.kill()
+                        except ProcessLookupError:
+                            pass
+                        child.wait(timeout=3)
+                self.child = None
+
+        def record_stop():
+            if not preserve_error:
+                self.error = ''
+            self.record()
+
+        # PF and telemetry failures must not orphan the relay process.
+        z.cleanup_steps(clear_udp, close_child, record_stop)
 
 
 def read_status(root=z.ROOT):
     data = {}
     for name in ('udp-mode.json', 'udp-status.json'):
         path = root / 'runtime' / name
-        if path.exists():
-            data[name] = json.loads(path.read_text())
+        try:
+            value = json.loads(path.read_text())
+        except FileNotFoundError:
+            continue
+        if not isinstance(value, dict):
+            raise z.Error(f'Некорректный файл состояния UDP: {name}')
+        data[name] = value
     return data
 
 
@@ -208,6 +254,9 @@ def show_status(root=z.ROOT):
     print('UDP-перехват:', 'АКТИВЕН' if mode.get('active') and status.get('ready') else 'ОТКЛЮЧЁН')
     print('IPv4 PF-проверка:', mode.get('ipv4_probe', 'не пройдена'))
     print('IPv6 PF-проверка:', mode.get('ipv6_probe', 'не пройдена'))
+    if mode.get('active') and mode.get('ipv6_probe') in ('failed', 'no-default-route'):
+        print('Работает только UDP IPv4; UDP IPv6 отключён:',
+              mode.get('ipv6_error') or 'нет маршрута IPv6 по умолчанию.')
     print('Пакеты к relay / в сеть / обратно:', status.get('received', 0), '/', status.get('forwarded', 0), '/', status.get('replies', 0))
     print('Discovery / STUN / фейки:', status.get('discoveries', 0), '/', status.get('stun', 0), '/', status.get('fakes', 0))
     print('Ошибка:', mode.get('error') or status.get('last_error') or '—')
@@ -262,14 +311,18 @@ def tune(root=z.ROOT):
             if answer in ('stop', 'стоп'):
                 break
     finally:
-        z.write_json(report, dict(trials=results, audio_confirmed_by_user=confirmed))
-        if not confirmed:
-            z.write_json(root / 'config.json', saved)
-            z.stop(root)
-            if was_running:
-                z.start(root)
-            print('Прежние настройки восстановлены.')
-        print('Отчёт подбора:', report)
+        try:
+            if not confirmed:
+                z.write_json(root / 'config.json', saved)
+                try:
+                    z.stop(root)
+                finally:
+                    if was_running:
+                        z.start(root)
+                print('Прежние настройки восстановлены.')
+        finally:
+            z.write_json(report, dict(trials=results, audio_confirmed_by_user=confirmed))
+            print('Отчёт подбора:', report)
 
 
 def voice_menu(root=z.ROOT):

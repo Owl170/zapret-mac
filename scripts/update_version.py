@@ -10,7 +10,7 @@ import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.package import package_files
+from scripts.package import package_files, replace_files
 
 PATTERN = r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)'
 
@@ -19,11 +19,6 @@ def version_tuple(value):
     if not re.fullmatch(PATTERN, value):
         raise ValueError('Версия должна иметь вид 0.2.1 без префикса v.')
     return tuple(int(part) for part in value.split('.'))
-
-
-def write_text(path, text):
-    with path.open('w', encoding='utf-8', newline='\n') as output:
-        output.write(text)
 
 
 def document_updates(root, version):
@@ -50,6 +45,8 @@ def sync(root, version, check=False, test_count=None, platform=''):
     manifest = json.loads((root / 'PROVENANCE.json').read_text(encoding='utf-8'))
     if test_count is not None and (test_count < 1 or not platform):
         raise ValueError('Для подтверждённых тестов нужны количество и платформа.')
+    files = list(package_files(root))
+    pending = {}
     if check:
         if current != version or manifest['version'] != version:
             raise ValueError('Версии VERSION и PROVENANCE.json не совпадают с релизом.')
@@ -57,22 +54,24 @@ def sync(root, version, check=False, test_count=None, platform=''):
             if (root / name).read_text(encoding='utf-8') != expected:
                 raise ValueError(f'Несогласованная версия: {name}')
     else:
-        write_text(root / 'VERSION', version + '\n')
+        pending[root / 'VERSION'] = (version + '\n').encode('utf-8')
         for name, target in documents.items():
-            write_text(root / name, target)
+            pending[root / name] = target.encode('utf-8')
         manifest['version'] = version
         if test_count is not None:
             manifest['tested_on'] = f'{platform}: {test_count} Python tests passed'
             manifest.setdefault('validation', {})['python_tests_passed'] = test_count
             manifest['validation']['python_tests_platform'] = platform
-    hashes = {file.relative_to(root).as_posix(): hashlib.sha256(file.read_bytes()).hexdigest()
-              for file in package_files(root) if file.name != 'PROVENANCE.json'}
+    hashes = {file.relative_to(root).as_posix(): hashlib.sha256(
+                  pending[file] if file in pending else file.read_bytes()).hexdigest()
+              for file in files if file.relative_to(root).as_posix() != 'PROVENANCE.json'}
     if check:
         if manifest['sha256'] != hashes:
             raise ValueError('Контрольные суммы не совпадают. Выполните синхронизацию версии.')
     else:
         manifest['sha256'] = dict(sorted(hashes.items()))
-        write_text(root / 'PROVENANCE.json', json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+        pending[root / 'PROVENANCE.json'] = (json.dumps(manifest, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        replace_files(pending)
 
 
 def main():

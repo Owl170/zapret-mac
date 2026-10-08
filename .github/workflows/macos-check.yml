@@ -22,6 +22,6 @@ jobs:
           clang -Iengine/tpws/macos native/pf_abi_probe.c -o /tmp/zmac-pf-abi
           /tmp/zmac-pf-abi > /tmp/zmac-native-abi.json
           python3 discord_udp.py abi > /tmp/zmac-python-abi.json
-          python3 -c 'import json; assert json.load(open("/tmp/zmac-native-abi.json")) == json.load(open("/tmp/zmac-python-abi.json"))'
+          python3 -c 'import json,sys; sys.exit(0 if json.load(open("/tmp/zmac-native-abi.json")) == json.load(open("/tmp/zmac-python-abi.json")) else "PF ABI mismatch")'
       - name: Verify end-to-end PF UDP path
-        run: sudo python3 scripts/check_pf_udp.py
+        run: sudo python3 scripts/check_pf_udp.py --trace

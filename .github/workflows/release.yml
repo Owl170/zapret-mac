@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          ref: main
       - name: Check current main and existing tag
         id: current
         shell: bash
@@ -28,18 +29,19 @@ jobs:
           latest=$(git ls-remote origin refs/heads/main | cut -f1)
           if [[ "$latest" != "$(git rev-parse HEAD)" ]]; then
             echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo 'A newer main commit exists; its queued run will publish the release.'
+            echo 'Main changed after checkout; this run will not modify it. Use workflow_dispatch on current main if publication is needed.'
             exit 0
           fi
-          echo 'ready=true' >> "$GITHUB_OUTPUT"
+          python3 scripts/release_state.py --event "$GITHUB_SHA"
           tag=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Python checks
+        id: tests
         if: steps.current.outputs.ready == 'true'
-        run: python3 -X utf8 -m unittest discover -s tests -v
+        run: python3 -X utf8 scripts/run_tests.py
       - name: Calculate next semantic version
         id: calculate
-        if: steps.current.outputs.ready == 'true' && steps.current.outputs.tag == ''
+        if: steps.current.outputs.ready == 'true' && steps.current.outputs.tag == '' && steps.current.outputs.resume_version == ''
         uses: mathieudutour/github-tag-action@af99e60ce8132224b8e6ebab5023449fe256ed46 # v7.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -47,37 +49,58 @@ jobs:
           default_bump: patch
           initial_version: 0.2.0
           dry_run: true
-      - name: Synchronize files and commit version
+      - name: Synchronize release files
         id: version
         if: steps.current.outputs.ready == 'true'
         env:
           EXISTING_TAG: ${{ steps.current.outputs.tag }}
+          RESUME_VERSION: ${{ steps.current.outputs.resume_version }}
           NEXT_VERSION: ${{ steps.calculate.outputs.new_version }}
+          TESTS_PASSED: ${{ steps.tests.outputs.passed }}
         shell: bash
         run: |
           if [[ -n "$EXISTING_TAG" ]]; then
             version="${EXISTING_TAG#v}"
             python3 scripts/update_version.py "$version" --check
+            commit=false
+          elif [[ -n "$RESUME_VERSION" ]]; then
+            version="$RESUME_VERSION"
+            python3 scripts/update_version.py "$version" --check
+            commit=false
           else
             version="$NEXT_VERSION"
             if [[ -z "$version" ]]; then
               echo 'publish=false' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            count=$(python3 -c 'import unittest; print(unittest.defaultTestLoader.discover("tests").countTestCases())')
-            python3 scripts/update_version.py "$version" --tests-passed "$count" --platform 'GitHub Actions Ubuntu'
+            python3 scripts/update_version.py "$version" --tests-passed "$TESTS_PASSED" --platform 'GitHub Actions Ubuntu'
+            commit=true
+          fi
+          echo "number=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo 'publish=true' >> "$GITHUB_OUTPUT"
+      - name: Build and verify portable archive
+        if: steps.version.outputs.publish == 'true'
+        run: python3 scripts/package.py
+      - name: Commit and push verified release files
+        id: revision
+        if: steps.version.outputs.publish == 'true'
+        env:
+          CREATE_COMMIT: ${{ steps.version.outputs.commit }}
+          RELEASE_VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          if [[ "$CREATE_COMMIT" == true ]]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add VERSION PROVENANCE.json README.md VOICE.md
             if ! git diff --cached --quiet; then
-              git commit -m "chore(release): v$version"
+              git commit -m "chore(release): v$RELEASE_VERSION"
               git push origin HEAD:main
             fi
           fi
-          echo "number=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo 'publish=true' >> "$GITHUB_OUTPUT"
       - name: Publish the tag at the version commit
         if: steps.version.outputs.publish == 'true' && steps.current.outputs.tag == ''
         uses: mathieudutour/github-tag-action@af99e60ce8132224b8e6ebab5023449fe256ed46 # v7.0.0
@@ -85,10 +108,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           release_branches: '^main$'
           custom_tag: ${{ steps.version.outputs.number }}
-          commit_sha: ${{ steps.version.outputs.sha }}
-      - name: Build and verify portable archive
-        if: steps.version.outputs.publish == 'true'
-        run: python3 scripts/package.py
+          commit_sha: ${{ steps.revision.outputs.sha }}
       - name: Write release notes
         if: steps.version.outputs.publish == 'true'
         env:

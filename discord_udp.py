@@ -111,9 +111,10 @@ def transmit(sock, data, payload, profile, inject):
     if inject and profile['repeats']:
         level, option = ((socket.IPPROTO_IP, socket.IP_TTL) if sock.family == socket.AF_INET
                          else (socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS))
-        original = sock.getsockopt(level, option) if profile['ttl'] else None
+        original = None
         try:
             if profile['ttl']:
+                original = sock.getsockopt(level, option)
                 sock.setsockopt(level, option, profile['ttl'])
             for _ in range(profile['repeats']):
                 try:
@@ -192,19 +193,35 @@ class Relay:
     def close_session(self, key):
         session = self.sessions.pop(key, None)
         if session:
-            self.selector.unregister(session['socket'])
-            session['socket'].close()
+            try:
+                self.selector.unregister(session['socket'])
+            except (KeyError, ValueError):
+                # A partial startup or a previous close may have unregistered it.
+                pass
+            finally:
+                session['socket'].close()
 
     def receive_client(self, listener):
         data, client = listener.recvfrom(65535)
         self.stats['received'] += 1
+        if not self.allow_local_test:
+            source = ipaddress.ip_address(client[0].split('%')[0])
+            local_address = ipaddress.ip_address(listener.getsockname()[0].split('%')[0])
+            # PF excludes loopback sources. Direct local datagrams cannot be
+            # redirected voice traffic, including fe80::1 packets sent on lo0.
+            if source.is_loopback or source == local_address:
+                return
         try:
             destination = self.resolver(client, listener.getsockname(), listener.family)
             self.lookup_streak = 0
         except (OSError, Error) as error:
             self.stats['lookup_errors'] += 1
-            self.lookup_streak += 1
             self.stats['last_error'] = 'NAT lookup: ' + str(error)
+            if getattr(error, 'errno', None) == errno.ENOENT:
+                # Direct traffic and expired states have no destination to
+                # forward. Drop them without letting them terminate the relay.
+                return
+            self.lookup_streak += 1
             if self.lookup_streak >= 3 or getattr(error, 'errno', None) == errno.E2BIG:
                 raise Error('PF не восстанавливает адрес UDP; перехват будет отключён.') from error
             return
@@ -293,51 +310,106 @@ class Relay:
         self.snapshot()
 
     def serve(self):
-        self.stats['ready'] = True
-        self.snapshot(True)
         try:
+            self.stats['ready'] = True
+            self.snapshot(True)
             while self.running:
                 self.step()
         finally:
             self.stats['ready'] = False
-            self.snapshot(True)
-            self.close()
+            try:
+                self.snapshot(True)
+            finally:
+                self.close()
 
     def close(self):
         for key in list(self.sessions):
             self.close_session(key)
         for listener in self.listeners:
-            self.selector.unregister(listener)
-            listener.close()
+            try:
+                self.selector.unregister(listener)
+            except (KeyError, ValueError):
+                pass
+            finally:
+                listener.close()
         self.listeners.clear()
         self.selector.close()
 
 
-def probe(address, token, timeout=3):
+def probe(address, token, timeout=3, *, debug=False):
     family = socket.AF_INET6 if ':' in address else socket.AF_INET
     packet = TEST_PREFIX + bytes.fromhex(token)
-    with socket.socket(family, socket.SOCK_DGRAM) as client:
-        client.settimeout(timeout)
-        client.connect((address, TEST_PORT))
-        deadline = time.monotonic() + timeout
-        try:
-            client.send(packet)
-        except OSError as error:
-            if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
-                raise
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise Error('UDP-самопроверка не получила точный обратный ответ.')
-            client.settimeout(remaining)
+    phase = 'socket'
+    debug_events = 0
+
+    def debug_event(event, client=None, error=None):
+        nonlocal debug_events
+        if not debug or debug_events >= 100:
+            return
+        debug_events += 1
+        details = dict(event=event, pid=os.getpid(), monotonic=time.monotonic(),
+                       address=address, family=int(family))
+        if client is not None:
+            for name, getter in [('local', client.getsockname), ('peer', client.getpeername)]:
+                try:
+                    details[name] = getter()
+                except OSError as lookup_error:
+                    details[name] = dict(errno=lookup_error.errno)
+        if error is not None:
+            details['errno'] = error.errno
+        print('UDP probe diagnostic: ' + json.dumps(details, default=str), file=sys.stderr, flush=True)
+
+    if debug:
+        import hashlib
+        details = dict(pid=os.getpid(), python=sys.version, executable=sys.executable,
+                       source=str(Path(__file__).resolve()),
+                       source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        print('UDP probe runtime: ' + json.dumps(details), file=sys.stderr, flush=True)
+    try:
+        debug_event('before_socket')
+        with socket.socket(family, socket.SOCK_DGRAM) as client:
+            debug_event('after_socket', client)
+            phase = 'timeout'
+            client.settimeout(timeout)
+            phase = 'connect'
+            debug_event('before_connect', client)
+            client.connect((address, TEST_PORT))
+            debug_event('after_connect', client)
+            deadline = time.monotonic() + timeout
+            phase = 'send'
+            debug_event('before_send', client)
             try:
-                response = client.recv(4096)
-                break
+                client.send(packet)
+                debug_event('after_send', client)
             except OSError as error:
+                debug_event('send_error', client, error)
                 if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
                     raise
-        if response != packet:
-            raise Error('UDP-самопроверка получила неправильный ответ.')
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Error('UDP-самопроверка не получила точный обратный ответ.')
+                phase = 'timeout'
+                client.settimeout(remaining)
+                phase = 'recv'
+                debug_event('before_recv', client)
+                try:
+                    response = client.recv(4096)
+                    debug_event('after_recv', client)
+                    break
+                except OSError as error:
+                    debug_event('recv_error', client, error)
+                    if error.errno not in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                        raise
+            if response != packet:
+                raise Error('UDP-самопроверка получила неправильный ответ.')
+            phase = 'close'
+            debug_event('before_close', client)
+    except OSError as error:
+        if debug:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        raise Error(f'UDP-самопроверка, этап {phase}, errno={error.errno}: {error}') from error
     print('UDP PF loop verified:', address)
 
 
@@ -347,12 +419,13 @@ def main():
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--address', default=TEST4)
     parser.add_argument('--token', default='')
+    parser.add_argument('--debug-probe', action='store_true', help='Log probe socket stages without packet contents.')
     args = parser.parse_args()
     if args.command == 'abi':
         print(json.dumps(dict(size=NATLOOK_SIZE, request=DIOCNATLOOK, sport=64, dport=68, rdport=76, af=80)))
         return
     if args.command == 'probe':
-        probe(args.address, args.token)
+        probe(args.address, args.token, debug=args.debug_probe)
         return
     cfg = config(args.root)
     payload = (args.root / 'payloads' / 'discord-fake.bin').read_bytes()
