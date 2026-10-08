@@ -131,9 +131,7 @@ class StableControllerTests(unittest.TestCase):
         child = Mock(pid=123)
         child.poll.return_value = None
         foreign = SimpleNamespace(returncode=0, stdout='p999\nf3\nn127.0.0.1:988\n')
-        # Port 988 needs root on macOS. Model an accepted connection here;
-        # sudo check_native.py covers the actual socket and lsof integration.
-        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+        with patch.object(z.socket, 'create_connection', side_effect=AssertionError('Readiness must not connect')), \
                 patch.object(z, 'run', return_value=foreign), \
                 patch.object(z.time, 'monotonic', side_effect=[0, 0, 1]), patch.object(z.time, 'sleep'):
             with self.assertRaises(z.Error):
@@ -143,7 +141,7 @@ class StableControllerTests(unittest.TestCase):
         child = Mock(pid=123)
         child.poll.return_value = None
         owned = SimpleNamespace(returncode=0, stdout='p123\nf4\nn127.0.0.1:988\n')
-        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+        with patch.object(z.socket, 'create_connection', side_effect=AssertionError('Readiness must not connect')), \
                 patch.object(z, 'run', return_value=owned):
             z.wait_ready(child, timeout=0.5)
 
@@ -151,7 +149,7 @@ class StableControllerTests(unittest.TestCase):
         child = Mock(pid=123)
         child.poll.side_effect = [None, 1]
         owned = SimpleNamespace(returncode=0, stdout='p123\nf4\nn127.0.0.1:988\n')
-        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+        with patch.object(z.socket, 'create_connection', side_effect=AssertionError('Readiness must not connect')), \
                 patch.object(z, 'run', return_value=owned), self.assertRaises(z.Error):
             z.wait_ready(child, timeout=0.5)
 
