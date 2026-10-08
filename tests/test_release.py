@@ -35,8 +35,27 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(manifest['flowseal_tag'], '1.10.3')
         self.assertFalse(manifest['discord_voice_tested'])
         self.assertEqual(manifest['validation']['python_tests_passed'], 49)
+        self.assertNotIn('python_tests_run', manifest['validation'])
+        self.assertNotIn('python_tests_skipped', manifest['validation'])
         self.assertEqual(manifest['sha256']['VERSION'], hashlib.sha256(b'0.3.0\n').hexdigest())
         sync(self.root, '0.3.0', check=True)
+
+    def test_new_platform_totals_replace_previous_test_run(self):
+        sync(self.root, '0.3.0', test_count=12, platform='Ubuntu fixture', test_run=14, test_skipped=2)
+        manifest = json.loads((self.root / 'PROVENANCE.json').read_text(encoding='utf-8'))
+        result = manifest['validation']
+        self.assertEqual((result['python_tests_run'], result['python_tests_passed'], result['python_tests_skipped']), (14, 12, 2))
+        self.assertEqual(result['python_tests_platform'], 'Ubuntu fixture')
+        self.assertIn('2 skipped; 14 total', manifest['tested_on'])
+        sync(self.root, '0.3.0', check=True)
+
+    def test_invalid_test_totals_do_not_modify_metadata(self):
+        before = {name: (self.root / name).read_bytes() for name in ('VERSION', 'PROVENANCE.json')}
+        for total, skipped in ((11, 0), (14, None), (None, 2), (14, -1)):
+            with self.subTest(total=total, skipped=skipped), self.assertRaises(ValueError):
+                sync(self.root, '0.3.0', test_count=12, platform='fixture', test_run=total, test_skipped=skipped)
+        for name, content in before.items():
+            self.assertEqual((self.root / name).read_bytes(), content)
 
     def test_invalid_or_lower_versions_do_not_modify_files(self):
         before = (self.root / 'VERSION').read_bytes()
