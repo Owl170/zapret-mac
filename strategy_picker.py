@@ -1,13 +1,15 @@
 """Select TCP profiles using Discord-specific results and a confirmation pass."""
 from pathlib import Path
 import zapret as z
+from discord_probe import CHECKS, SCHEMA
 
 REQUIRED = ('DiscordMain', 'DiscordGateway', 'DiscordCDN', 'DiscordUpdates')
 
 
 def complete(rows):
     by_name = {r['name']: r for r in rows}
-    return all(by_name.get(name, {}).get('tls_reached') is True for name in REQUIRED)
+    return (all(by_name.get(name, {}).get('tls_reached') is True for name in REQUIRED)
+            and all(by_name.get(name, {}).get('application_ok') is True for name in CHECKS))
 
 
 def rank(rows):
@@ -23,7 +25,7 @@ def select(root=z.ROOT):
     configured = [name for name, _ in z.targets(root)]
     if len(configured) != len(set(configured)) or not set(REQUIRED).issubset(configured):
         raise z.Error('Для автоподбора нужны четыре уникальных адреса Discord в targets.txt.')
-    report = dict(accepted=False, selected=None, trials=[], confirmation=[])
+    report = dict(schema=SCHEMA, accepted=False, selected=None, trials=[], confirmation=[])
     path = root / 'logs' / ('auto-strategy-' + z.stamp() + '.json')
     committed = False
     failure = None
@@ -37,13 +39,16 @@ def select(root=z.ROOT):
             names = [n for n in dict.fromkeys([previous['strategy'], 'passthrough', 'tlsrec'] + names) if n in names]
             candidates = []
             for name in names:
+                print('Проверка профиля:', name, flush=True)
                 z.stop(root)
                 z.write_json(root / 'config.json', dict(previous, strategy=name, voice_udp=False))
                 z.start(root)
                 rows = z.network_tests(root, quiet=True)
                 report['trials'].append(dict(strategy=name, rows=rows))
                 discord = sum(r['tls_reached'] is True for r in rows if r['name'] in REQUIRED)
-                print(f'{name}: Discord {discord}/4, всего TLS {rank(rows)[1]}/{len(rows)}', flush=True)
+                application = sum(r.get('application_ok') is True for r in rows if r['name'] in CHECKS)
+                print(f'{name}: Discord TLS {discord}/4, приложение {application}/4, '
+                      f'всего ответов {rank(rows)[1]}/{len(rows)}', flush=True)
                 if complete(rows):
                     candidates.append((name, rows))
             # Stable sorting preserves the tie preference above.
@@ -60,9 +65,10 @@ def select(root=z.ROOT):
                     z.write_json(root / 'runtime' / 'strategy-selection.json', report)
                     committed = True
                     print('Сохранена и включена стратегия:', name, flush=True)
-                    print('Проверены TCP/TLS-адреса Discord; голос и видео требуют проверки в приложении.')
+                    print('Проверены страница, JavaScript, API и WebSocket Discord; '
+                          'вход в аккаунт, голос и видео требуют проверки в приложении.')
                     return True
-            print('Ни один профиль не подтвердил все четыре адреса Discord.')
+            print('Ни один профиль не подтвердил адреса и все четыре этапа загрузки Discord.')
             return False
         except BaseException as error:
             failure = error

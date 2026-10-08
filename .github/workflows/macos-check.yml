@@ -17,6 +17,10 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Python checks
         run: python3 -m unittest discover -s tests -v
+      - name: Verify Discord probes with system Python
+        run: |
+          /usr/bin/python3 -m unittest discover -s tests -p test_discord_probe.py -v
+          /usr/bin/python3 -c 'import ssl; context=ssl.create_default_context(); count=len(context.get_ca_certs()); print("System Python trusted CAs:", count); assert count > 0, "System Python has no trusted certificate roots"'
       - name: Build universal official engine
         run: make -C engine/tpws mac CC=clang CFLAGS='-std=gnu99 -Os -ffunction-sections -fdata-sections' LDFLAGS=''
       - name: Fuzz protocol parsers with address and undefined behavior sanitizers
