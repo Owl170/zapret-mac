@@ -15,6 +15,7 @@ import plistlib
 import re
 import shutil
 import signal
+import stat
 import socket
 import subprocess
 import sys
@@ -35,7 +36,8 @@ FLOW_URL = 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/ma
 API_URL = 'https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest'
 DEFAULTS = dict(strategy='split', game_filter=False, game_tcp='1024-65535',
                 ipset='loaded', quic_fallback=False, ipv6=True, auto_update_check=False,
-                voice_udp=False, voice_profile='fake', voice_ports='3478,5349,19294-19344,50000-65535')
+                voice_udp=False, voice_profile='fake', voice_ports='3478,5349,19294-19344,50000-65535',
+                autostart=True)
 BASE_PORTS = '80,443,2053,2083,2087,2096,8443'
 PRIVATE4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
             '172.16.0.0/12', '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4']
@@ -48,6 +50,34 @@ USER_FILES = ['list-general-user.txt', 'list-exclude-user.txt',
 
 class Error(Exception):
     pass
+
+
+@contextlib.contextmanager
+def control_lock(root=ROOT):
+    """Serialize configuration operations, separate from the supervisor lock."""
+    if sys.platform != 'darwin':
+        yield
+        return
+    import fcntl
+    directory = root / 'runtime'
+    if root.is_symlink() or directory.is_symlink():
+        raise Error('Каталог блокировки содержит символическую ссылку.')
+    if not directory.exists():
+        yield  # Fresh installation has no configuration to serialize yet.
+        return
+    info = directory.stat()
+    if os.geteuid() == 0 and (info.st_uid != 0 or info.st_mode & 0o022):
+        raise Error('Каталог блокировки должен принадлежать root и запрещать чужую запись.')
+    fd = os.open(directory / 'control.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'r+') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or (os.geteuid() == 0 and info.st_uid != 0):
+            raise Error('Некорректный файл блокировки.')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Error('Другая операция уже меняет настройки. Дождитесь её завершения.') from None
+        yield
 
 
 def version(root=ROOT):
@@ -118,7 +148,7 @@ def validate_config(cfg, root=ROOT):
     if cfg['ipset'] not in ('none', 'loaded', 'any'):
         raise Error('IPSet должен быть none, loaded или any.')
     ports(cfg['game_tcp'])
-    for key in ('game_filter', 'quic_fallback', 'ipv6', 'auto_update_check', 'voice_udp'):
+    for key in ('game_filter', 'quic_fallback', 'ipv6', 'auto_update_check', 'voice_udp', 'autostart'):
         if not isinstance(cfg[key], bool):
             raise Error(f'{key}: требуется true или false.')
     if cfg['voice_profile'] not in ('relay', 'fake', 'ttl3', 'ttl5', 'ttl7', 'ttl9'):
@@ -671,17 +701,48 @@ def restart(root=ROOT):
 
 def autostart(enabled, root=ROOT):
     require_mac(True)
+    if PLIST.is_symlink():
+        raise Error('Файл автозапуска содержит символическую ссылку.')
+    cfg = config(root)
+    cfg['autostart'] = enabled
+    validate_config(cfg, root)
+    paths = (PLIST, root / 'config.json')
+    saved = {p: p.read_bytes() if p.exists() else None for p in paths}
+    was_running = is_running(root)
     stop(root)
-    if enabled:
-        data = dict(Label=LABEL,
-                    ProgramArguments=[sys.executable, '-u', str(root / 'zapret.py'), 'supervise'],
-                    RunAtLoad=True, KeepAlive=True, ThrottleInterval=10, ExitTimeOut=20,
-                    StandardOutPath=str(root / 'logs' / 'service.log'),
-                    StandardErrorPath=str(root / 'logs' / 'service.log'))
-        atomic_write(PLIST, plistlib.dumps(data))
-        start(root)
-    else:
-        PLIST.unlink(missing_ok=True)
+    try:
+        if enabled:
+            data = dict(Label=LABEL,
+                        ProgramArguments=[sys.executable, '-u', str(root / 'zapret.py'), 'supervise'],
+                        RunAtLoad=True, KeepAlive=True, ThrottleInterval=10, ExitTimeOut=20,
+                        StandardOutPath=str(root / 'logs' / 'service.log'),
+                        StandardErrorPath=str(root / 'logs' / 'service.log'))
+            atomic_write(PLIST, plistlib.dumps(data))
+            write_json(root / 'config.json', cfg)
+            start(root)
+        else:
+            PLIST.unlink(missing_ok=True)
+            write_json(root / 'config.json', cfg)
+    except BaseException as error:
+        def restore(path, content):
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, content)
+        failures = []
+        for action in [lambda: stop(root)] + [lambda p=p, b=b: restore(p, b) for p, b in saved.items()]:
+            try:
+                action()
+            except BaseException as failure:
+                failures.append(str(failure))
+        if was_running and not failures:
+            try:
+                start(root)
+            except BaseException as failure:
+                failures.append(str(failure))
+        if failures:
+            raise Error(f'Автозапуск не изменён полностью: {error}; откат: {"; ".join(failures)}') from error
+        raise
     print('Автозапуск ' + ('включён.' if enabled else 'удалён; обход остановлен.'))
 
 
@@ -819,22 +880,14 @@ def clean_discord_cache(root=ROOT):
     if running.returncode != 1:
         raise Error('Не удалось проверить, закрыт ли Discord; кеш сохранён. '
                     + getattr(running, 'stderr', '').strip())
-    base = Path(user.pw_dir) / 'Library' / 'Application Support'
-    moved = 0
-    for name in ('discord', 'discordcanary', 'discordptb'):
-        app = base / name
-        for folder in ('Cache', 'Code Cache', 'GPUCache'):
-            path = app / folder
-            if path.is_dir() and not path.is_symlink():
-                # Every ancestor belongs to the user and may change after the
-                # check. Perform the rename with that user's permissions.
-                destination = app / (folder + '.zapret-backup-' + stamp())
-                run(['/usr/bin/sudo', '-u', '#' + str(user.pw_uid), '--',
-                     sys.executable, '-c',
-                     'import os,sys; os.rename(sys.argv[1], sys.argv[2])',
-                     path, destination])
-                moved += 1
-    print(f'Перемещено папок кеша: {moved}. Копии сохранены рядом с исходными папками.')
+    result = run(['/usr/bin/sudo', '-u', '#' + str(user.pw_uid), '--', sys.executable,
+                  Path(__file__).with_name('discord_cache.py'), user.pw_dir], timeout=None)
+    report = json.loads(result.stdout)
+    print(f'Очищено папок кэша: {len(report["moved"])}. Резервные копии сохранены рядом.')
+    if report['skipped']:
+        print('Пропущены ссылки или неподходящие пути:', ', '.join(report['skipped']))
+    print('Данные входа и настройки аккаунта сохранены. Очистка кэша не проверяет доступ к серверу обновлений.')
+    return report
 
 
 def curl_test(target):
@@ -845,11 +898,14 @@ def curl_test(target):
     # Transparent PF intentionally exempts root, so tests must use the invoking user.
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         args = ['/usr/bin/sudo', '-u', '#' + str(original_user().pw_uid), '--'] + args
-    result = run(args, check=False, timeout=16)
+    try:
+        result = run(args, check=False, timeout=16)
+    except subprocess.TimeoutExpired:
+        return dict(name=name, url=url, tls_reached=False, http='000', seconds='16', error='Таймаут проверки')
     parts = result.stdout.strip().split()
     code = parts[0] if parts else '000'
     elapsed = parts[1] if len(parts) > 1 else '?'
-    return dict(name=name, url=url, tls_reached=result.returncode == 0 and code != '000',
+    return dict(name=name, url=url, tls_reached=result.returncode == 0 and bool(re.fullmatch('[1-5][0-9]{2}', code)),
                 http=code, seconds=elapsed, error=result.stderr.strip())
 
 
@@ -960,7 +1016,8 @@ def install(binary, source=SOURCE, root=ROOT):
     require_mac(True)
     folders = ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads')
     copies = [(source / name, root / name, 0o644)
-              for name in ('zapret.py', 'discord_udp.py', 'voice_controller.py', 'strategies.json', 'VERSION', 'targets.txt')]
+              for name in ('zapret.py', 'discord_udp.py', 'voice_controller.py', 'discord_cache.py',
+                           'strategy_picker.py', 'strategies.json', 'VERSION', 'targets.txt')]
     copies += [(Path(binary), root / 'bin' / 'tpws', 0o755),
                (source / 'payloads' / 'discord-fake.bin', root / 'payloads' / 'discord-fake.bin', 0o644)]
     for folder in ('lists', 'licenses'):
@@ -1058,6 +1115,7 @@ def install(binary, source=SOURCE, root=ROOT):
             raise Error(f'Установка прервана: {install_error}. Восстановление предыдущей установки не завершено: {rollback_error}') from rollback_error
         raise
     print('Установка завершена. Настройки предыдущей установки сохранены.')
+    return was_running
 
 
 def uninstall(root=ROOT):
@@ -1065,7 +1123,8 @@ def uninstall(root=ROOT):
     stop(root)
     PLIST.unlink(missing_ok=True)
     manage_hosts(False, root)
-    for path in (root / 'bin' / 'tpws', root / 'zapret.py', root / 'discord_udp.py', root / 'voice_controller.py', root / 'strategies.json', root / 'targets.txt', root / 'VERSION'):
+    for path in (root / 'bin' / 'tpws', root / 'zapret.py', root / 'discord_udp.py', root / 'voice_controller.py',
+                 root / 'discord_cache.py', root / 'strategy_picker.py', root / 'strategies.json', root / 'targets.txt', root / 'VERSION'):
         path.unlink(missing_ok=True)
     print('Движок и автозапуск удалены. Настройки, списки и резервные копии сохранены в:', root)
 
@@ -1086,73 +1145,70 @@ def choose_strategy(root=ROOT):
             restart(root)
 
 
+def connect(root=ROOT):
+    from strategy_picker import select
+    cfg = config(root)
+    try:
+        saved = json.loads((root / 'runtime/strategy-selection.json').read_text())
+    except (FileNotFoundError, ValueError):
+        saved = {}
+    if isinstance(saved, dict) and saved.get('accepted') is True and saved.get('selected') == cfg['strategy']:
+        with control_lock(root):
+            restart(root)
+    else:
+        select(root)
+
+
+def configure_install(root=ROOT, resume=False):
+    from strategy_picker import select
+    try:
+        select(root)
+    except (Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print('Автоподбор не завершён:', error)
+    if config(root)['autostart']:
+        with control_lock(root):
+            autostart(True, root)
+    else:
+        if resume and not is_running(root):
+            with control_lock(root):
+                start(root)
+        print('Сохранено отключение автозапуска.')
+
+
 def menu(root=ROOT):
     require_mac(True)
-    if config(root)['auto_update_check']:
-        try:
-            check_updates(root)
-        except Exception as error:
-            print('Проверка обновлений:', error)
     while True:
-        cfg = config(root)
-        print('\nZapretMac ' + version(root) + ' — TCP и экспериментальный Discord UDP')
+        print('\nZapretMac ' + version(root))
         status(root)
-        print(f'\n1. Включить / перезапустить\n2. Остановить\n3. Выбрать стратегию\n'
-              f'4. Включить автозапуск\n5. Удалить автозапуск и остановить\n'
-              f'6. Статус\n7. Game Filter TCP [{cfg["game_filter"]}] / порты\n'
-              f'8. IPSet [{cfg["ipset"]}]\n9. QUIC → TCP [{cfg["quic_fallback"]}]\n'
-              f'10. Обновить списки\n11. Применить hosts Flowseal\n12. Удалить наш блок hosts\n'
-              f'13. Проверить обновления Flowseal\n14. Проверка обновлений при открытии [{cfg["auto_update_check"]}]\n'
-              f'15. Диагностика\n16. Проверка сайтов\n17. Проверка всех TCP-стратегий\n'
-              f'18. Сохранить и очистить кеш Discord\n19. IPv6 [{cfg["ipv6"]}]\n'
-              f'20. Открыть папку пользовательских списков\n21. Режим голоса Discord\n0. Выход')
+        print('\n1. Подключить / перезапустить\n2. Остановить\n'
+              '3. Автоматически подобрать стратегию\n4. Голос Discord\n'
+              '5. Очистить кэш Discord\n6. Проверить подключение\n'
+              f'7. Автозапуск [{"включён" if PLIST.exists() else "выключен"}]\n0. Выход')
         try:
             choice = input('Выберите пункт: ').strip()
             if choice == '0':
                 return
-            if choice == '1': restart(root)
-            elif choice == '2': stop(root)
-            elif choice == '3': choose_strategy(root)
-            elif choice == '4': autostart(True, root)
-            elif choice == '5': autostart(False, root)
-            elif choice == '6': status(root)
-            elif choice == '7':
-                print('Игровой фильтр поддерживает TCP. Для голоса Discord используйте пункт 21.')
-                value = input('Порты TCP или off (Enter — без изменений): ').strip()
-                if value:
-                    cfg['game_filter'] = value != 'off'
-                    if value != 'off': cfg['game_tcp'] = ports(value)
-                    write_json(root / 'config.json', cfg)
-                    if is_running(root): restart(root)
-            elif choice == '8':
-                value = input('IPSet: none / loaded / any: ').strip()
-                cfg['ipset'] = value
-                validate_config(cfg, root)
-                write_json(root / 'config.json', cfg)
-                if is_running(root): restart(root)
-            elif choice in ('9', '14', '19'):
-                key = {'9': 'quic_fallback', '14': 'auto_update_check', '19': 'ipv6'}[choice]
-                if choice == '9':
-                    print('Опция блокирует UDP/443 для всех обычных приложений; поддерживающие fallback переходят на TCP.')
-                cfg[key] = not cfg[key]
-                validate_config(cfg, root)
-                write_json(root / 'config.json', cfg)
-                if key != 'auto_update_check' and is_running(root): restart(root)
-            elif choice == '10': update_lists(root)
-            elif choice == '11': manage_hosts(True, root)
-            elif choice == '12': manage_hosts(False, root)
-            elif choice == '13': check_updates(root)
-            elif choice == '15': diagnostics(root)
-            elif choice == '16': network_tests(root)
-            elif choice == '17': test_strategies(root)
-            elif choice == '18': clean_discord_cache(root)
-            elif choice == '20':
-                user = original_user()
-                run(['/usr/bin/sudo', '-u', '#' + str(user.pw_uid), '/usr/bin/open', root / 'lists'])
-            elif choice == '21':
+            if choice == '1':
+                connect(root)
+            elif choice == '2':
+                with control_lock(root):
+                    stop(root)
+            elif choice == '3':
+                from strategy_picker import select
+                select(root)
+            elif choice == '4':
                 from voice_controller import voice_menu
                 voice_menu(root)
-            else: print('Неизвестный пункт.')
+            elif choice == '5':
+                clean_discord_cache(root)
+            elif choice == '6':
+                status(root)
+                network_tests(root)
+            elif choice == '7':
+                with control_lock(root):
+                    autostart(not PLIST.exists(), root)
+            else:
+                print('Неизвестный пункт.')
         except (Error, OSError, ValueError, subprocess.TimeoutExpired, urllib.error.URLError) as error:
             print('Ошибка:', error)
         input('Enter — вернуться в меню…')
@@ -1164,7 +1220,7 @@ def main():
                         'restart', 'status', 'autostart-on', 'autostart-off', 'update-lists',
                         'check-updates', 'hosts-apply', 'hosts-remove', 'diagnostics',
                         'test-sites', 'test-strategies', 'cache-discord', 'plan',
-                        'voice-menu', 'voice-status', 'voice-observe'])
+                        'voice-menu', 'voice-status', 'voice-observe', 'auto-strategy', 'choose-strategy'])
     parser.add_argument('--engine', type=Path)
     args = parser.parse_args()
     if args.command == 'plan':
@@ -1182,16 +1238,24 @@ def main():
                 'stop': stop, 'restart': restart, 'status': status, 'update-lists': update_lists,
                 'check-updates': check_updates, 'diagnostics': diagnostics, 'test-sites': network_tests,
                 'test-strategies': test_strategies, 'cache-discord': clean_discord_cache,
+                'choose-strategy': choose_strategy,
                 'hosts-apply': lambda: manage_hosts(True), 'hosts-remove': lambda: manage_hosts(False),
                 'autostart-on': lambda: autostart(True), 'autostart-off': lambda: autostart(False)}
     from voice_controller import voice_menu, show_status, observe
+    from strategy_picker import select
+    commands['auto-strategy'] = select
     commands.update({'voice-menu': voice_menu, 'voice-status': show_status, 'voice-observe': observe})
     if args.command == 'install':
         if not args.engine or not args.engine.is_file():
             raise Error('Укажите существующий tpws через --engine.')
-        install(args.engine)
+        with control_lock(ROOT) if ROOT.exists() else contextlib.nullcontext():
+            resume = install(args.engine)
+        configure_install(resume=resume)
     else:
-        commands[args.command]()
+        read_or_interactive = {'supervise', 'menu', 'voice-menu', 'voice-status', 'voice-observe',
+                               'status', 'diagnostics', 'test-sites', 'check-updates', 'auto-strategy'}
+        with contextlib.nullcontext() if args.command in read_or_interactive else control_lock(ROOT):
+            commands[args.command]()
 
 
 if __name__ == '__main__':

@@ -291,7 +291,7 @@ def observe(root=z.ROOT, duration=30):
     print('Отчёт:', report)
 
 
-def tune(root=z.ROOT):
+def _tune(root=z.ROOT):
     """User reconnects for each trial; only their audio confirmation selects a profile."""
     saved = z.config(root)
     was_running = z.is_running(root)
@@ -335,65 +335,74 @@ def tune(root=z.ROOT):
             print('Отчёт подбора:', report)
 
 
+def tune(root=z.ROOT):
+    with z.control_lock(root):
+        _tune(root)
+
+
+def change_voice(root=z.ROOT, *, enabled=None, profile=None):
+    with z.control_lock(root):
+        previous = z.config(root)
+        was_running = z.is_running(root)
+        cfg = dict(previous)
+        if enabled is not None:
+            cfg['voice_udp'] = enabled
+        if profile is not None:
+            if profile not in PROFILES:
+                raise z.Error('Неизвестный UDP-профиль.')
+            cfg['voice_profile'] = profile
+        z.validate_config(cfg, root)
+        try:
+            z.write_json(root / 'config.json', cfg)
+            if enabled is True or was_running:
+                z.restart(root)
+            elif enabled is False:
+                clear_udp()
+        except BaseException as error:
+            def restore():
+                z.write_json(root / 'config.json', previous)
+                if was_running:
+                    z.start(root)
+            try:
+                z.cleanup_steps(lambda: z.stop(root), restore)
+            except BaseException as rollback:
+                raise z.Error(f'Изменение голоса прервано: {error}; откат: {rollback}') from error
+            raise
+
+
 def voice_menu(root=z.ROOT):
     z.require_mac(True)
     while True:
         cfg = z.config(root)
-        print('\nDiscord Voice — экспериментальный локальный UDP-обход')
-        print('Профиль:', cfg['voice_profile'], '| UDP-порты:', cfg['voice_ports'])
+        print('\nГолос Discord — экспериментальный UDP')
+        print('Профиль:', cfg['voice_profile'])
         show_status(root)
-        print('\n1. Включить режим голоса / перезапустить\n2. Сменить UDP-профиль\n'
-              '3. Наблюдать подключение 30 секунд\n4. Отключить UDP-перехват\n'
-              '5. Изменить UDP-порты\n6. Выбрать TCP-стратегию для подключения Discord\n'
-              '7. Диагностика\n8. Помощник подбора UDP-стратегии\n0. Выход')
+        print('\n1. Включить / перезапустить\n2. Сменить профиль голоса\n'
+              '3. Наблюдать подключение 30 секунд\n4. Отключить режим голоса\n'
+              '5. Помощник подбора голоса\n0. Выход')
         try:
             choice = input('Пункт: ').strip()
             if choice == '0':
                 return
             if choice == '1':
-                cfg['voice_udp'] = True
-                z.write_json(root / 'config.json', cfg)
-                z.restart(root)
+                change_voice(root, enabled=True)
                 show_status(root)
                 if read_status(root).get('udp-mode.json', {}).get('active'):
-                    print('Отключитесь от голосового канала и подключитесь снова.')
+                    print('Переподключитесь к голосовому каналу.')
                 else:
-                    print('UDP не запущен. Сначала проверьте причину в диагностике, пункт 7.')
+                    print('UDP не запущен. Передайте показанную ошибку и logs/udp.log.')
             elif choice == '2':
-                print('relay — без фейков; fake — 6 фейков с обычным TTL; '
-                      'ttl3 / ttl5 / ttl7 / ttl9 — 6 фейков с указанным TTL.')
-                value = input('Профиль: ').strip()
-                if value not in PROFILES:
-                    raise z.Error('Неизвестный UDP-профиль.')
-                cfg['voice_profile'] = value
-                z.write_json(root / 'config.json', cfg)
-                if z.is_running(root):
-                    z.restart(root)
-                print('После смены профиля переподключитесь к голосовому каналу.')
+                print('relay / fake / ttl3 / ttl5 / ttl7 / ttl9')
+                change_voice(root, profile=input('Профиль: ').strip())
+                print('Переподключитесь к голосовому каналу.')
             elif choice == '3':
                 observe(root)
             elif choice == '4':
-                cfg['voice_udp'] = False
-                z.write_json(root / 'config.json', cfg)
-                if z.is_running(root):
-                    z.restart(root)
-                else:
-                    clear_udp()
+                change_voice(root, enabled=False)
             elif choice == '5':
-                print('Стандарт: 3478,5349,19294-19344,50000-65535. Для нестандартных серверов: 1024-65535.')
-                cfg['voice_ports'] = input('Порты UDP: ').strip()
-                z.validate_config(cfg, root)
-                z.write_json(root / 'config.json', cfg)
-                if z.is_running(root):
-                    z.restart(root)
-            elif choice == '6':
-                z.choose_strategy(root)
-            elif choice == '7':
-                z.diagnostics(root)
-            elif choice == '8':
                 tune(root)
             else:
                 print('Неизвестный пункт.')
-        except (z.Error, OSError, ValueError) as error:
+        except (z.Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
             print('Ошибка:', error)
         input('Enter — меню…')

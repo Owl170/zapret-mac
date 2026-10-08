@@ -26,4 +26,5 @@ clang -Iengine/tpws/macos native/pf_abi_probe.c -o "$TASK_BUILD/pf_abi_probe"
 /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) == json.load(open(sys.argv[2])) else "PF ABI mismatch")' "$TASK_BUILD/abi-native.json" "$TASK_BUILD/abi-python.json"
 echo 'Установка в /Library/Application Support/ZapretMac.'
 sudo /usr/bin/python3 zapret.py install --engine "$TASK_BUILD/tpws/tpws"
-echo 'Готово. Для Discord откройте voice.command и выберите пункт 1.'
+echo 'Готово. Автозапуск включается по умолчанию; выбранные настройки сохранены.'
+echo 'Для голоса откройте voice.command и выберите пункт 1.'
