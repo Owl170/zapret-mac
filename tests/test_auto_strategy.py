@@ -121,6 +121,22 @@ class AutoStrategyTests(unittest.TestCase):
         self.assertTrue(row['tls_reached'])
         self.assertFalse(row['transfer_complete'])
 
+    def test_legacy_csv_report_accepts_application_and_transfer_fields(self):
+        import csv
+        rows = self.rows(picker.REQUIRED)
+        rows[0]['transfer_complete'] = False
+        with patch.object(z, 'require_mac'), patch.object(z, 'is_running', return_value=True), \
+                patch.object(z, 'strategies', return_value={'passthrough': {}, 'split': {}}), \
+                patch.object(z, 'stop'), patch.object(z, 'start'), patch.object(z, 'network_tests', return_value=rows):
+            z.test_strategies(self.root)
+        report = list((self.root / 'logs').glob('tests-*.csv'))[0]
+        with report.open(encoding='utf-8', newline='') as stream:
+            saved = list(csv.DictReader(stream))
+        self.assertEqual(len(saved), 2 * len(rows))
+        self.assertEqual(saved[0]['transfer_complete'], 'False')
+        self.assertEqual(saved[-1]['application_ok'], 'True')
+        self.assertEqual(z.config(self.root), self.saved)
+
     def test_curl_timeout_is_a_failed_target_not_a_failed_batch(self):
         with patch.object(z, 'run', side_effect=subprocess.TimeoutExpired('curl', 16)):
             self.assertFalse(z.curl_test(('DiscordUpdates', 'https://updates.discord.com'))['tls_reached'])

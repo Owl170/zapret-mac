@@ -982,11 +982,12 @@ def test_strategies(root=ROOT):
             cfg = dict(previous, strategy=name)
             write_json(root / 'config.json', cfg)
             start(root)
-            for row in network_tests(root, quiet=True):
+            current = network_tests(root, quiet=True)
+            for row in current:
                 rows.append(dict(strategy=name, **row))
             stop(root)
             count = sum(r['tls_reached'] for r in rows if r['strategy'] == name)
-            print(f'Ответы TLS: {count}/{len(targets(root))}', flush=True)
+            print(f'Ответы TLS: {count}/{len(current)}', flush=True)
     finally:
         def restore_service():
             write_json(root / 'config.json', previous)
@@ -997,7 +998,8 @@ def test_strategies(root=ROOT):
             if rows:
                 report.parent.mkdir(parents=True, exist_ok=True)
                 with report.open('w', newline='', encoding='utf-8') as output:
-                    writer = csv.DictWriter(output, fieldnames=['strategy', 'name', 'url', 'tls_reached', 'http', 'seconds', 'error'])
+                    writer = csv.DictWriter(output, fieldnames=['strategy', 'name', 'url', 'tls_reached',
+                                           'transfer_complete', 'application_ok', 'http', 'seconds', 'error'])
                     writer.writeheader()
                     writer.writerows(rows)
 
