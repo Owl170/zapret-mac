@@ -339,7 +339,13 @@ def apply_pf(cfg, root=ROOT):
 
 def get_state(root=ROOT):
     path = root / 'runtime' / 'state.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    try:
+        state = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(state, dict):
+        raise Error('Некорректный runtime/state.json: ожидается JSON-объект.')
+    return state
 
 
 def is_running(root=ROOT):
@@ -349,6 +355,75 @@ def is_running(root=ROOT):
         return False
     result = run(['/bin/ps', '-p', str(pid), '-o', 'command='], check=False)
     return result.returncode == 0 and str(root / 'zapret.py') in result.stdout and 'supervise' in result.stdout
+
+
+def matches_stale_child(pid, kind, root=ROOT):
+    """Check the saved PID's UID and exact program identity before any signal."""
+    if type(pid) is not int or pid < 2 or pid == os.getpid():
+        return False
+    result = run(['/bin/ps', '-ww', '-p', str(pid), '-o', 'uid=,command='],
+                 check=False, timeout=2)
+    found = re.fullmatch(r'\s*(\d+)[ \t]+([^\r\n]+)\s*', result.stdout)
+    if result.returncode or not found or int(found.group(1)) != 0:
+        return False
+    command = found.group(2).strip()
+    if kind == 'engine':
+        executable = str(root / 'bin' / 'tpws')
+        return command == executable or command.startswith(executable + ' ')
+    suffix = f' -u {root / "discord_udp.py"} serve --root {root}'
+    if kind != 'udp' or not command.endswith(suffix):
+        return False
+    interpreter = command[:-len(suffix)]
+    # An interpreter upgrade must not hide an orphan launched by the old Python.
+    executable = Path(interpreter)
+    return (interpreter == sys.executable or
+            (executable.is_absolute() and re.fullmatch(r'[Pp]ython(?:3(?:\.\d+)*)?', executable.name)
+             and executable.is_file()))
+
+
+def recover_stale_children(root=ROOT):
+    """Recover recorded children left by SIGKILL, without searching ports/PIDs."""
+    if is_running(root):
+        return
+    state = get_state(root)
+    status_path = root / 'runtime' / 'udp-status.json'
+    status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.exists() else {}
+    if not isinstance(status, dict):
+        raise Error('Некорректный runtime/udp-status.json: PID relay не подтверждён.')
+    candidates = [(state.get('engine_pid'), 'engine'), (status.get('pid'), 'udp')]
+
+    def terminate(pid, kind):
+        if type(pid) is not int or pid < 2 or pid in (os.getpid(), state.get('pid')):
+            return
+        if not matches_stale_child(pid, kind, root):
+            return
+        def wait_stopped():
+            end = time.monotonic() + 3
+            while time.monotonic() < end:
+                if not matches_stale_child(pid, kind, root):
+                    return True
+                time.sleep(0.1)
+            return not matches_stale_child(pid, kind, root)
+
+        if is_running(root):
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        if wait_stopped():
+            return
+        # Identity is checked again after the grace period: the PID can be reused.
+        if is_running(root) or not matches_stale_child(pid, kind, root):
+            return
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        if not wait_stopped():
+            raise Error(f'Не удалось завершить оставшийся процесс {kind}, PID {pid}.')
+
+    cleanup_steps(*(lambda pid=pid, kind=kind: terminate(pid, kind) for pid, kind in candidates))
 
 
 def wait_ready(child, timeout=15):
@@ -378,6 +453,8 @@ def supervise(root=ROOT):
             raise Error('Другой экземпляр ZapretMac уже работает.')
         stop_requested = False
         child = None
+        child_stopped = True
+        recovery_done = False
         from voice_controller import Backend
         udp_backend = Backend(root)
 
@@ -386,6 +463,7 @@ def supervise(root=ROOT):
             stop_requested = True
 
         def stop_child():
+            nonlocal child_stopped
             if child.poll() is None:
                 try:
                     child.terminate()
@@ -399,13 +477,15 @@ def supervise(root=ROOT):
                     except ProcessLookupError:
                         pass
                     child.wait(timeout=5)
+            child_stopped = True
 
         signal.signal(signal.SIGTERM, stop_signal)
         signal.signal(signal.SIGINT, stop_signal)
         state_path = root / 'runtime' / 'state.json'
         try:
             # Recover our stale anchor/token after an interrupted previous run.
-            release_pf(root)
+            cleanup_steps(lambda: release_pf(root), lambda: recover_stale_children(root))
+            recovery_done = True
             while not stop_requested:
                 cfg = config(root)
                 prepare_lists(root)
@@ -413,6 +493,9 @@ def supervise(root=ROOT):
                 run(args + ['--dry-run'])
                 write_json(state_path, dict(pid=os.getpid(), phase='starting', strategy=cfg['strategy']))
                 child = subprocess.Popen(args)
+                child_stopped = False
+                write_json(state_path, dict(pid=os.getpid(), engine_pid=child.pid,
+                                           phase='starting', strategy=cfg['strategy']))
                 wait_ready(child)
                 if stop_requested:
                     break
@@ -436,7 +519,7 @@ def supervise(root=ROOT):
         finally:
             cleanup_steps(udp_backend.stop, lambda: release_pf(root),
                           lambda: stop_child() if child else None,
-                          lambda: state_path.unlink(missing_ok=True))
+                          lambda: state_path.unlink(missing_ok=True) if recovery_done and child_stopped else None)
     finally:
         service_lock.close()
 
@@ -457,7 +540,7 @@ def stop(root=ROOT):
             time.sleep(0.1)
         if is_running(root):
             raise Error('Supervisor не завершился. Проверьте logs/service.log.')
-    release_pf(root)
+    cleanup_steps(lambda: release_pf(root), lambda: recover_stale_children(root))
     root.joinpath('runtime', 'state.json').unlink(missing_ok=True)
 
 
@@ -581,7 +664,11 @@ def strip_hosts_block(text):
         return text
     if text.count(HOST_BEGIN) != 1 or text.count(HOST_END) != 1 or text.index(HOST_BEGIN) > text.index(HOST_END):
         raise Error('Повреждён блок ZapretMac в /etc/hosts; исправьте маркеры вручную.')
-    return re.sub(r'^' + re.escape(HOST_BEGIN) + r'\n.*?^' + re.escape(HOST_END) + r'\n?', '', text, flags=re.M | re.S)
+    pattern = r'^' + re.escape(HOST_BEGIN) + r'\n.*?^' + re.escape(HOST_END) + r'(?:\n|$)'
+    clean, removed = re.subn(pattern, '', text, flags=re.M | re.S)
+    if removed != 1:
+        raise Error('Маркеры ZapretMac в /etc/hosts должны находиться на отдельных строках.')
+    return clean
 
 
 def manage_hosts(apply, root=ROOT):

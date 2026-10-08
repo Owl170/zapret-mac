@@ -16,6 +16,10 @@ import voice_controller as voice
 
 class ControllerAuditTests(unittest.TestCase):
     def setUp(self):
+        # Recovery executes only on macOS; model its SIGKILL in Windows mocks.
+        sigkill = patch.object(z.signal, 'SIGKILL', getattr(z.signal, 'SIGKILL', 9), create=True)
+        sigkill.start()
+        self.addCleanup(sigkill.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -209,6 +213,105 @@ class ControllerAuditTests(unittest.TestCase):
                 z.supervise(self.root)
         child.wait.assert_called_once_with(timeout=5)
         self.assertFalse((self.root / 'runtime/state.json').exists())
+
+    def test_stop_recovers_only_recorded_root_children_after_supervisor_sigkill(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444, 'phase': 'running'})
+        z.write_json(self.root / 'runtime/udp-status.json', {'pid': 555, 'ready': True})
+        commands = {444: str(self.root / 'bin/tpws') + ' --port=988 --user=root',
+                    555: f'{sys.executable} -u {self.root / "discord_udp.py"} serve --root {self.root}'}
+        alive = set(commands)
+
+        def ps(args, **kwargs):
+            self.assertEqual(args[:2], ['/bin/ps', '-ww'])
+            self.assertEqual(args[-2:], ['-o', 'uid=,command='])
+            pid = int(args[args.index('-p') + 1])
+            return SimpleNamespace(returncode=0 if pid in alive else 1,
+                                   stdout='0 ' + commands[pid] + '\n' if pid in alive else '')
+
+        def terminate(pid, sig):
+            alive.discard(pid)
+
+        with patch.object(z, 'require_mac'), patch.object(z, 'launch_loaded', return_value=False), patch.object(z, 'is_running', return_value=False), patch.object(z, 'release_pf'), patch.object(z, 'run', side_effect=ps), patch.object(z.os, 'kill', side_effect=terminate) as kill:
+            z.stop(self.root)
+        self.assertEqual([call.args for call in kill.call_args_list], [(444, z.signal.SIGTERM), (555, z.signal.SIGTERM)])
+        self.assertFalse((self.root / 'runtime/state.json').exists())
+
+    def test_reused_pids_and_non_root_processes_are_never_signalled(self):
+        engine = str(self.root / 'bin/tpws')
+        udp = f'{sys.executable} -u {self.root / "discord_udp.py"} serve --root {self.root}'
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        z.write_json(self.root / 'runtime/udp-status.json', {'pid': 555})
+        for engine_line, udp_line in [('501 ' + engine + ' --port=988', '501 ' + udp),
+                                      ('0 ' + engine + '-other --port=988', '0 other-process --saved-command=' + udp),
+                                      ('0 /unrelated/tpws --port=988', '0 ' + udp + '-other')]:
+            with self.subTest(engine=engine_line, udp=udp_line):
+                def ps(args, **kwargs):
+                    pid = int(args[args.index('-p') + 1])
+                    return SimpleNamespace(returncode=0, stdout=(engine_line if pid == 444 else udp_line) + '\n')
+                with patch.object(z, 'is_running', return_value=False), patch.object(z, 'run', side_effect=ps), patch.object(z.os, 'kill') as kill:
+                    z.recover_stale_children(self.root)
+                kill.assert_not_called()
+
+    def test_recovery_never_touches_children_of_live_supervisor(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        z.write_json(self.root / 'runtime/udp-status.json', {'pid': 555})
+        with patch.object(z, 'is_running', return_value=True), patch.object(z, 'run') as run, patch.object(z.os, 'kill') as kill:
+            z.recover_stale_children(self.root)
+        run.assert_not_called()
+        kill.assert_not_called()
+
+    def test_old_python_interpreter_does_not_hide_a_recorded_udp_child(self):
+        older = self.base / 'Python Tools' / 'python3.9'
+        older.parent.mkdir()
+        older.write_bytes(b'old interpreter')
+        command = f'0 {older} -u {self.root / "discord_udp.py"} serve --root {self.root}\n'
+        with patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=command)):
+            self.assertTrue(z.matches_stale_child(555, 'udp', self.root))
+
+    def test_new_live_supervisor_prevents_signal_after_recovery_initial_check(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        with patch.object(z, 'is_running', side_effect=[False, True]), patch.object(z, 'matches_stale_child', return_value=True), patch.object(z.os, 'kill') as kill:
+            z.recover_stale_children(self.root)
+        kill.assert_not_called()
+
+    def test_state_removed_during_shutdown_is_treated_as_stopped(self):
+        with patch.object(Path, 'read_text', side_effect=FileNotFoundError('state removed')):
+            self.assertEqual(z.get_state(self.root), {})
+
+    def test_engine_pid_is_persisted_before_waiting_for_listening_port(self):
+        child = Mock(pid=444)
+        child.poll.return_value = None
+        backend = Mock(active=False)
+        fake_fcntl = SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=4)
+
+        def readiness(process):
+            self.assertEqual(z.get_state(self.root)['engine_pid'], process.pid)
+            self.assertEqual(z.get_state(self.root)['phase'], 'starting')
+            raise z.Error('engine failed to bind')
+
+        with patch.object(z, 'require_mac'), patch.object(z.signal, 'signal'), patch.dict(sys.modules, {'fcntl': fake_fcntl}), patch.object(z, 'is_running', return_value=False), patch.object(voice, 'Backend', return_value=backend), patch.object(z, 'release_pf'), patch.object(z, 'run'), patch.object(z, 'wait_ready', side_effect=readiness), patch.object(z.subprocess, 'Popen', return_value=child):
+            with self.assertRaisesRegex(z.Error, 'failed to bind'):
+                z.supervise(self.root)
+        child.terminate.assert_called_once()
+
+    def test_pid_reused_during_grace_period_does_not_receive_sigkill(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        with patch.object(z, 'is_running', return_value=False), patch.object(z, 'matches_stale_child', side_effect=[True, True, False]), patch.object(z.time, 'monotonic', side_effect=[0, 4]), patch.object(z.os, 'kill') as kill:
+            z.recover_stale_children(self.root)
+        kill.assert_called_once_with(444, z.signal.SIGTERM)
+
+    def test_unresponsive_recorded_child_gets_sigkill_after_identity_recheck(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        with patch.object(z, 'is_running', return_value=False), patch.object(z, 'matches_stale_child', side_effect=[True, True, True, False]), patch.object(z.time, 'monotonic', side_effect=[0, 4, 4, 5]), patch.object(z.os, 'kill') as kill:
+            z.recover_stale_children(self.root)
+        self.assertEqual([call.args for call in kill.call_args_list], [(444, z.signal.SIGTERM), (444, z.signal.SIGKILL)])
+
+    def test_failed_stale_child_recovery_keeps_pid_metadata_for_retry(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        with patch.object(z, 'require_mac'), patch.object(z, 'launch_loaded', return_value=False), patch.object(z, 'is_running', return_value=False), patch.object(z, 'release_pf'), patch.object(z, 'matches_stale_child', return_value=True), patch.object(z.time, 'monotonic', side_effect=[0, 4, 4, 8]), patch.object(z.os, 'kill'):
+            with self.assertRaisesRegex(z.Error, 'Не удалось завершить'):
+                z.stop(self.root)
+        self.assertEqual(z.get_state(self.root)['engine_pid'], 444)
 
 
 if __name__ == '__main__':

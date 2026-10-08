@@ -204,13 +204,24 @@ class Relay:
     def receive_client(self, listener):
         data, client = listener.recvfrom(65535)
         self.stats['received'] += 1
+        if not self.allow_local_test:
+            source = ipaddress.ip_address(client[0].split('%')[0])
+            local_address = ipaddress.ip_address(listener.getsockname()[0].split('%')[0])
+            # PF excludes loopback sources. Direct local datagrams cannot be
+            # redirected voice traffic, including fe80::1 packets sent on lo0.
+            if source.is_loopback or source == local_address:
+                return
         try:
             destination = self.resolver(client, listener.getsockname(), listener.family)
             self.lookup_streak = 0
         except (OSError, Error) as error:
             self.stats['lookup_errors'] += 1
-            self.lookup_streak += 1
             self.stats['last_error'] = 'NAT lookup: ' + str(error)
+            if getattr(error, 'errno', None) == errno.ENOENT:
+                # Direct traffic and expired states have no destination to
+                # forward. Drop them without letting them terminate the relay.
+                return
+            self.lookup_streak += 1
             if self.lookup_streak >= 3 or getattr(error, 'errno', None) == errno.E2BIG:
                 raise Error('PF не восстанавливает адрес UDP; перехват будет отключён.') from error
             return

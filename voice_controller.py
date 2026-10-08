@@ -126,13 +126,30 @@ class Backend:
             if cancelled():
                 raise z.Error('Запуск UDP отменён при остановке сервиса.')
             ipv6_probe = 'disabled'
+            ipv6_error = ''
             if cfg['ipv6']:
                 route = z.run(['/sbin/route', '-n', 'get', '-inet6', 'default'], check=False)
                 if route.returncode == 0:
-                    z.run(command + ['--address', TEST6], timeout=5)
-                    ipv6_probe = 'passed'
+                    try:
+                        z.run(command + ['--address', TEST6], timeout=5)
+                        ipv6_probe = 'passed'
+                    except (z.Error, subprocess.TimeoutExpired) as error:
+                        ipv6_probe = 'failed'
+                        ipv6_error = str(error)
                 else:
                     ipv6_probe = 'no-default-route'
+            if cancelled():
+                raise z.Error('Запуск UDP отменён при остановке сервиса.')
+            if self.child.poll() is not None:
+                raise z.Error('UDP-relay завершился во время самопроверки.')
+            if cfg['ipv6'] and ipv6_probe != 'passed':
+                # A default route alone does not prove usable IPv6 UDP. Keep the
+                # verified IPv4 path, and remove every unverified IPv6 rule first.
+                active_cfg = dict(cfg, ipv6=False)
+                text = udp_rules(active_cfg, self.root, ll, probe_only=probe_only)
+                z.atomic_write(rules, udp_rules(active_cfg, self.root, ll, probe_only=True))
+                z.pf('-n', '-a', UDP_ANCHOR, '-f', rules)
+                z.pf('-a', UDP_ANCHOR, '-f', rules)
             if cancelled():
                 raise z.Error('Запуск UDP отменён при остановке сервиса.')
             if self.child.poll() is not None:
@@ -142,8 +159,11 @@ class Backend:
                 z.pf('-a', UDP_ANCHOR, '-f', rules)
             self.active = True
             self.error = ''
-            self.record(profile=cfg['voice_profile'], ipv4_probe='passed', ipv6_probe=ipv6_probe)
-            print('UDP-самопроверка пройдена. Режим голоса:', cfg['voice_profile'], flush=True)
+            self.record(profile=cfg['voice_profile'], ipv4_probe='passed', ipv6_probe=ipv6_probe,
+                        ipv6_error=ipv6_error, ipv4_active=True, ipv6_active=ipv6_probe == 'passed')
+            print('UDP IPv4 PF-самопроверка пройдена. Режим голоса:', cfg['voice_profile'], flush=True)
+            if cfg['ipv6'] and ipv6_probe != 'passed':
+                print('UDP IPv6 отключён: ' + (ipv6_error or 'нет маршрута IPv6 по умолчанию.'), flush=True)
             return True
         except (z.Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
             self.error = str(error)
@@ -234,6 +254,9 @@ def show_status(root=z.ROOT):
     print('UDP-перехват:', 'АКТИВЕН' if mode.get('active') and status.get('ready') else 'ОТКЛЮЧЁН')
     print('IPv4 PF-проверка:', mode.get('ipv4_probe', 'не пройдена'))
     print('IPv6 PF-проверка:', mode.get('ipv6_probe', 'не пройдена'))
+    if mode.get('active') and mode.get('ipv6_probe') in ('failed', 'no-default-route'):
+        print('Работает только UDP IPv4; UDP IPv6 отключён:',
+              mode.get('ipv6_error') or 'нет маршрута IPv6 по умолчанию.')
     print('Пакеты к relay / в сеть / обратно:', status.get('received', 0), '/', status.get('forwarded', 0), '/', status.get('replies', 0))
     print('Discovery / STUN / фейки:', status.get('discoveries', 0), '/', status.get('stun', 0), '/', status.get('fakes', 0))
     print('Ошибка:', mode.get('error') or status.get('last_error') or '—')

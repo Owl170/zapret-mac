@@ -19,6 +19,61 @@ import zapret as z
 
 
 class RelayFailureTests(unittest.TestCase):
+    def test_direct_loopback_datagrams_cannot_terminate_relay(self):
+        resolver = Mock(side_effect=OSError(errno.ENOENT, 'no PF state'))
+        relay = u.Relay(resolver, profile='relay')
+        self.addCleanup(relay.close)
+        listener = relay.listen(('127.0.0.1', 0))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            for _ in range(3):
+                client.sendto(b'direct local packet', listener)
+                relay.step(timeout=1)
+        self.assertEqual(relay.stats['received'], 3)
+        self.assertTrue(relay.running)
+        self.assertEqual(relay.stats['forwarded'], 0)
+        resolver.assert_not_called()
+
+    def test_missing_nat_states_are_dropped_without_stopping_relay(self):
+        resolver = Mock(side_effect=OSError(errno.ENOENT, 'no PF state'))
+        relay = u.Relay(resolver, profile='relay')
+        self.addCleanup(relay.close)
+        listener = Mock(family=socket.AF_INET)
+        listener.getsockname.return_value = ('127.0.0.1', u.UDP_PORT)
+        listener.recvfrom.return_value = (b'direct packet', ('192.0.2.1', 50001))
+        for _ in range(3):
+            relay.receive_client(listener)
+        self.assertEqual(resolver.call_count, 3)
+        self.assertEqual(relay.stats['lookup_errors'], 3)
+        self.assertEqual(relay.lookup_streak, 0)
+        self.assertTrue(relay.running)
+        self.assertEqual(relay.stats['forwarded'], 0)
+        self.assertEqual(relay.sessions, {})
+
+    def test_ipv6_loopback_and_direct_listener_source_are_not_resolved(self):
+        resolver = Mock(side_effect=OSError(errno.ENOENT, 'no PF state'))
+        relay = u.Relay(resolver, profile='relay')
+        self.addCleanup(relay.close)
+        listener = Mock(family=socket.AF_INET6)
+        listener.getsockname.return_value = ('fe80::1', u.UDP_PORT, 0, 1)
+        for source in ('::1', 'fe80::1%lo0'):
+            listener.recvfrom.return_value = (b'local packet', (source, 50001, 0, 1))
+            relay.receive_client(listener)
+        resolver.assert_not_called()
+        self.assertEqual(relay.stats['forwarded'], 0)
+
+    def test_repeated_structural_nat_errors_still_disable_relay(self):
+        resolver = Mock(side_effect=OSError(errno.EIO, 'PF I/O failure'))
+        relay = u.Relay(resolver, profile='relay')
+        self.addCleanup(relay.close)
+        listener = Mock(family=socket.AF_INET)
+        listener.getsockname.return_value = ('127.0.0.1', u.UDP_PORT)
+        listener.recvfrom.return_value = (b'voice', ('192.0.2.1', 50001))
+        relay.receive_client(listener)
+        relay.receive_client(listener)
+        with self.assertRaises(z.Error):
+            relay.receive_client(listener)
+        self.assertEqual(relay.stats['forwarded'], 0)
+
     def test_unavailable_ttl_skips_fakes_but_delivers_real_packet(self):
         sock = Mock(family=socket.AF_INET)
         sock.getsockopt.side_effect = OSError(errno.ENOPROTOOPT, 'TTL unavailable')
@@ -94,7 +149,10 @@ class RelayFailureTests(unittest.TestCase):
                 u.probe(u.TEST4, 'ae01' * 16, debug=True)
         client.send.assert_not_called()
         self.assertIn('Traceback', output.getvalue())
-        self.assertIn('client.connect((address, TEST_PORT))', output.getvalue())
+        self.assertIn('discord_udp.py', output.getvalue())
+        self.assertIn('OSError', output.getvalue())
+        self.assertIn('before_connect', output.getvalue())
+        self.assertNotIn('after_connect', output.getvalue())
         self.assertNotIn('ae01' * 16, output.getvalue())
 
 
@@ -114,6 +172,95 @@ class BackendFailureTests(unittest.TestCase):
         backend.child = Mock()
         backend.child.poll.return_value = None
         return backend, backend.child
+
+    def start_with_family_probes(self, *, ipv6_failure=None, route_code=0, child_crashes=False):
+        child = Mock(pid=123)
+        crashed = False
+        child.poll.side_effect = lambda: 1 if crashed else None
+        applied = []
+        probes = []
+
+        def spawn(*args, **kwargs):
+            z.write_json(self.root / 'runtime/udp-status.json', dict(pid=123, ready=True))
+            return child
+
+        def pf(*args, **kwargs):
+            if args[0] == '-a':
+                applied.append(Path(args[-1]).read_text())
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        def run(args, **kwargs):
+            nonlocal crashed
+            if args[0] == '/sbin/ifconfig':
+                return types.SimpleNamespace(returncode=0, stdout='inet6 fe80::1%lo0', stderr='')
+            if args[0] == '/sbin/route':
+                return types.SimpleNamespace(returncode=route_code, stdout='', stderr='')
+            if args[-1] in (u.TEST4, u.TEST6):
+                probes.append(args[-1])
+                if args[-1] == u.TEST6 and ipv6_failure:
+                    crashed = child_crashes
+                    raise ipv6_failure
+                return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            raise AssertionError('Unexpected command: ' + repr(args))
+
+        backend = v.Backend(self.root)
+        with patch.object(v, 'clear_udp'), patch('subprocess.Popen', side_effect=spawn), \
+                patch.object(z, 'pf', side_effect=pf), patch.object(z, 'run', side_effect=run), \
+                patch.object(v, 'user_uid', return_value=501):
+            try:
+                started = backend.start(dict(z.DEFAULTS, voice_udp=True))
+                mode = v.read_status(self.root)['udp-mode.json']
+            finally:
+                backend.stop()
+        return started, mode, applied, probes
+
+    def test_failed_ipv6_probe_preserves_verified_ipv4_and_removes_ipv6_rules(self):
+        started, mode, applied, probes = self.start_with_family_probes(ipv6_failure=z.Error('no IPv6 route'))
+        self.assertTrue(started)
+        self.assertEqual(probes, [u.TEST4, u.TEST6])
+        self.assertTrue(mode['ipv4_active'])
+        self.assertFalse(mode['ipv6_active'])
+        self.assertEqual(mode['ipv6_probe'], 'failed')
+        self.assertEqual(mode['ipv6_error'], 'no IPv6 route')
+        self.assertIn('inet6', applied[0])
+        self.assertNotIn('label "zmac-udp"', applied[1])
+        self.assertNotIn('inet6', applied[1])
+        self.assertIn('label "zmac-udp"', applied[-1])
+        self.assertNotIn('inet6', applied[-1])
+
+    def test_successful_ipv6_probe_enables_both_verified_families(self):
+        started, mode, applied, probes = self.start_with_family_probes()
+        self.assertTrue(started)
+        self.assertEqual(probes, [u.TEST4, u.TEST6])
+        self.assertTrue(mode['ipv4_active'])
+        self.assertTrue(mode['ipv6_active'])
+        self.assertEqual(mode['ipv6_probe'], 'passed')
+        self.assertIn('inet6', applied[-1])
+        self.assertIn('label "zmac-udp"', applied[-1])
+
+    def test_unverified_ipv6_without_default_route_is_never_enabled(self):
+        started, mode, applied, probes = self.start_with_family_probes(route_code=1)
+        self.assertTrue(started)
+        self.assertEqual(probes, [u.TEST4])
+        self.assertFalse(mode['ipv6_active'])
+        self.assertEqual(mode['ipv6_probe'], 'no-default-route')
+        self.assertTrue(all('inet6' not in text for text in applied[1:]))
+
+    def test_ipv6_probe_timeout_keeps_only_verified_ipv4(self):
+        started, mode, applied, probes = self.start_with_family_probes(
+            ipv6_failure=subprocess.TimeoutExpired('IPv6 probe', 5))
+        self.assertTrue(started)
+        self.assertEqual(mode['ipv6_probe'], 'failed')
+        self.assertFalse(mode['ipv6_active'])
+        self.assertNotIn('inet6', applied[-1])
+
+    def test_relay_crash_during_ipv6_probe_still_disables_every_family(self):
+        started, mode, applied, probes = self.start_with_family_probes(
+            ipv6_failure=z.Error('IPv6 probe failed'), child_crashes=True)
+        self.assertFalse(started)
+        self.assertFalse(mode['active'])
+        self.assertEqual(len(applied), 1)
+        self.assertNotIn('label "zmac-udp"', applied[0])
 
     def test_pf_cleanup_failure_still_terminates_relay(self):
         backend, child = self.backend_with_child()

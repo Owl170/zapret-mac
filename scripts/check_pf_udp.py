@@ -118,7 +118,9 @@ def main(argv=None):
                         print('probe route:', z.run(['/sbin/route', '-n', 'get', v.TEST4], check=False).stdout)
                         raise SystemExit('FAIL: ' + backend.error)
                     print(json.dumps(v.read_status(root), indent=2, ensure_ascii=False))
-                    print('PASS: non-root UDP → PF redirect → original destination lookup → reverse NAT reply.')
+                    print('PASS: non-root IPv4 UDP → PF redirect → original destination lookup → reverse NAT reply.')
+                    mode = v.read_status(root).get('udp-mode.json', {})
+                    print('IPv6 probe:', mode.get('ipv6_probe', 'disabled'))
                     print('Only reserved probe destinations were redirected. This does not test Discord audio.')
                 finally:
                     backend.stop()
