@@ -3,10 +3,12 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+from pathlib import Path
 import struct
 import subprocess
 import threading
 import time
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -98,7 +100,20 @@ class HttpTests(unittest.TestCase):
     def setUp(self):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path == '/api/v10/gateway':
+                self.server.requests.append((self.path, self.headers.get('Range')))
+                status = 200
+                binary = self.path.endswith(('Discord.zip', 'full.distro'))
+                if self.path.startswith('/api/updates/stable'):
+                    body = json.dumps(self.server.legacy).encode()
+                    kind = 'application/json'
+                elif self.path.startswith('/distributions/app/manifests/latest'):
+                    body = json.dumps(self.server.modern).encode()
+                    kind = 'application/json'
+                elif binary:
+                    body = b'X' * (512 if self.server.mode == 'short-range' else 1024)
+                    kind = 'text/html' if self.server.mode == 'binary-html' else 'application/octet-stream'
+                    status = 200 if self.server.mode == 'ignore-range' else 206
+                elif self.path == '/api/v10/gateway':
                     body = json.dumps({'url': self.server.gateway}).encode()
                     kind = 'application/json'
                 elif self.path.endswith('.js'):
@@ -107,9 +122,13 @@ class HttpTests(unittest.TestCase):
                 else:
                     body = b'<html><script src="/assets/test.js"></script></html>'
                     kind = 'text/html'
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header('Content-Type', kind)
                 length = len(body) + (100 if self.server.mode == 'partial' else 0)
+                if binary:
+                    length = 1024
+                    self.send_header('Content-Range', 'bytes 1-1024/9999' if self.server.mode == 'wrong-range'
+                                     else 'bytes 0-1023/9999')
                 self.send_header('Content-Length', str(length))
                 self.end_headers()
                 self.wfile.write(body)
@@ -118,6 +137,10 @@ class HttpTests(unittest.TestCase):
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.server.mode = 'good'
         self.server.gateway = 'wss://gateway.discord.gg/'
+        self.server.requests = []
+        self.server.legacy = dict(name='0.0.1', url=f'https://{d.UPDATE_HOST}/apps/osx/0.0.1/Discord.zip')
+        self.server.modern = dict(full=dict(host_version=[0, 0, 1], package_sha256='a' * 64,
+                                          url=f'https://{d.UPDATE_HOST}/distro/app/stable/osx/universal/0.0.1/full.distro'))
         self.thread = threading.Thread(target=lambda: self.server.serve_forever(poll_interval=0.01), daemon=True)
         self.thread.start()
         self.addCleanup(self.close)
@@ -158,8 +181,84 @@ class HttpTests(unittest.TestCase):
         with self.assertRaises(d.ProbeError):
             d.fetch('https://outside.invalid', 10)
 
+    def test_real_update_metadata_and_both_range_downloads_pass(self):
+        rows = d.update_checks()
+        self.assertTrue(all(r['application_ok'] for r in rows))
+        self.assertEqual(rows[-1]['http'], '206')
+        binary = [r for r in self.server.requests if r[0].endswith(('Discord.zip', 'full.distro'))]
+        self.assertEqual(len(binary), 2)
+        self.assertTrue(all(r[1] == 'bytes=0-1023' for r in binary))
+
+    def test_missing_or_bad_update_metadata_prevents_download(self):
+        for value in ([], {'name': '0.0.1'}, {'name': '../private', 'url': 'https://outside.invalid'}):
+            with self.subTest(value=value):
+                self.server.legacy = value
+                rows = d.update_checks()
+                self.assertFalse(rows[0]['application_ok'])
+                self.assertFalse(rows[-1]['application_ok'])
+        self.assertFalse(any(r[1] for r in self.server.requests))
+
+    def test_update_urls_cannot_redirect_to_arbitrary_hosts_or_paths(self):
+        original = self.server.legacy['url']
+        for url in ('http://' + d.UPDATE_HOST + '/apps/osx/0.0.1/Discord.zip',
+                    original + '?token=anything', original.replace(d.UPDATE_HOST, 'outside.invalid'),
+                    original.replace('/0.0.1/', '/0.0.2/'), original.replace('Discord.zip', '../private')):
+            with self.subTest(url=url):
+                self.server.legacy['url'] = url
+                self.assertFalse(d.update_checks()[0]['application_ok'])
+        self.server.legacy['url'] = original
+        self.server.modern['full']['url'] = 'https://127.0.0.1/private'
+        self.assertFalse(d.update_checks()[1]['application_ok'])
+        self.assertFalse(any(r[1] for r in self.server.requests))
+
+    def test_update_manifest_requires_bounded_numeric_version_and_sha256(self):
+        original = self.server.modern['full'].copy()
+        for version, digest in (([0, 0, True], 'a' * 64), ([0, 0, -1], 'a' * 64),
+                                ([0, 0, 1000001], 'a' * 64), ('0.0.1', 'a' * 64),
+                                ([0, 0, 1], 'invalid')):
+            with self.subTest(version=version, digest=digest):
+                self.server.modern['full'] = dict(original, host_version=version, package_sha256=digest)
+                self.assertFalse(d.update_checks()[1]['application_ok'])
+
+    def test_update_download_rejects_truncation_wrong_range_html_or_ignored_range(self):
+        for mode in ('short-range', 'wrong-range', 'binary-html', 'ignore-range'):
+            with self.subTest(mode=mode):
+                self.server.mode = mode
+                rows = d.update_checks()
+                self.assertTrue(all(r['application_ok'] for r in rows[:2]))
+                self.assertFalse(rows[-1]['application_ok'])
+
+    def test_binary_host_is_not_permitted_for_unbounded_metadata_requests(self):
+        with self.assertRaises(d.ProbeError):
+            d.fetch(self.server.legacy['url'], 1024)
+
 
 class ControllerProbeTests(unittest.TestCase):
+    def test_family_diagnostics_use_user_requests_and_preserve_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hosts = root / 'hosts'
+            original = '127.0.0.1 localhost\n203.0.113.5 discord.com updates.discord.com\n'
+            hosts.write_text(original)
+            rows = [dict(name='DiscordMain', url=d.APP, tls_reached=False, error='timeout')]
+            with patch.object(z, 'HOSTS', hosts), patch.object(z.os, 'geteuid', return_value=0, create=True), \
+                    patch.object(z, 'original_user', return_value=SimpleNamespace(pw_uid=501)), \
+                    patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout='200 0.1', stderr='')) as run:
+                z.connection_details(root, rows)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(len(commands), 2)
+            self.assertTrue(all(cmd[:4] == ['/usr/bin/sudo', '-u', '#501', '--'] for cmd in commands))
+            self.assertTrue(any('--ipv4' in cmd for cmd in commands))
+            self.assertTrue(any('--ipv6' in cmd for cmd in commands))
+            report = json.loads(next((root / 'logs').glob('connection-*.json')).read_text())
+            self.assertEqual(report['discord_hosts'], ['203.0.113.5 discord.com updates.discord.com'])
+            self.assertEqual(hosts.read_text(), original)
+
+    def test_healthy_targets_do_not_trigger_additional_network_requests(self):
+        with patch.object(z, 'run') as run:
+            z.connection_details(Path('.'), [dict(name='DiscordMain', tls_reached=True)])
+        run.assert_not_called()
+
     def test_probes_run_as_invoking_user_so_pf_can_intercept_them(self):
         rows = [dict(name=n, url='', http='200', seconds='0', error='', tls_reached=True, application_ok=True) for n in d.CHECKS]
         with patch.object(z.os, 'geteuid', return_value=0, create=True), \
