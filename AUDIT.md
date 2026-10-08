@@ -86,3 +86,5 @@ IPv6-проба завершилась в `socket.connect()` с `errno=65`, `No 
 - SHA256 проверяет согласованность содержимого пакета с manifest и не заменяет цифровую подпись издателя.
 
 Регрессии находятся в `tests/test_controller_audit.py`, `test_udp_audit.py`, `test_packaging_audit.py`, `test_native_audit.py`, `test_hosts_audit.py`, `test_updates_audit.py`, `test_cache_audit.py`, `test_process_audit.py` и `test_workflow_audit.py`; прежние тесты также сохранены.
+
+Проверка стабильности UDP коммита `705b9b2e` ([CI](https://github.com/Owl170/zapret-mac/actions/runs/37802926626)) прошла на macOS 14 и 15: все 200 Python-тестов, включая сохранение порта после тишины и реальные сокеты при лимите 64 дескриптора, и прежние нативные проверки TCP/PF/UDP. Число сессий учитывает системный лимит файлов и оставляет запас для служебных ресурсов. На Windows прошли 195 из 200 тестов; 5 пропусков относятся к POSIX-правам, ссылкам и лимиту дескрипторов. Случайный сбой пользователя этим результатом ещё не объяснён.
