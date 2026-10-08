@@ -3,7 +3,7 @@
   "flowseal_tag": "1.10.3",
   "flowseal_release_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.3",
   "zapret_commit": "c4d0b1990129dce2b28095277173ee0d7702d304",
-  "tested_on": "Windows (199 run, 4 skipped): 195 Python tests passed",
+  "tested_on": "Windows (200 run, 5 skipped): 195 Python tests passed",
   "macos_build_and_network_tested": false,
   "sha256": {
     ".gitattributes": "446dbe4b9a9103fe6a411cc46e70b18a4d2d9174ad02e117b4b607b8db93695f",
@@ -15,8 +15,8 @@
     "README.md": "ecbd3e9532bcf7b21eb12deb22a5766fde9f20149ed865a11519653b13c8d472",
     "THIRD_PARTY.md": "ef1177d47d497848ffe38553d070737b66c27bc99862676f541f1624a0624fea",
     "VERSION": "44e161e4495cac2cf7858043e9e6418e9579f0ddcfae826f9a372622968ce066",
-    "VOICE.md": "1fec3ee804e0cf74fec21ec6c7bd1923db3b8003a40828bc526ed801dca973db",
-    "discord_udp.py": "85e7e1561ba95d26eab88919ecf18dba15d0312f3cc8bdaed6f8617d3d83bcd1",
+    "VOICE.md": "f60714b5d715c81ee742ddb14fa518a9845bc59f47a52104ccb8ac9a9ebd85fc",
+    "discord_udp.py": "0e6ae2e93c77e2301f760c2a8dffae0302f9c58e7c02e7ab32bdfc6ed78933c4",
     "engine/tpws/BSDmakefile": "8799c60ffc571cee74f0de73830b3c811bbd01506546c636645efe9e43de546e",
     "engine/tpws/Makefile": "79963f137f0c37bfcafb70868e92e3055ebada5ccc7ea49a12e5bceb0274b279",
     "engine/tpws/andr/_musl_license.txt": "fa4bea86d015ddeac4171fb8d04c388075751ac6805ca3ef763057856007a9b9",
@@ -106,12 +106,12 @@
     "tests/test_stable_controller.py": "0fa7f808fa57ff52848d05a8a2e1353a11acf8100fc61b457d7dce7bf73ef883",
     "tests/test_udp_audit.py": "041788269c9374e0cede359c4c6456cb731d7359e0ab752079f7154c777c15d6",
     "tests/test_updates_audit.py": "2cd07269732b865fedd5dc2b45e468033f8a5dd0edc1af8a4641e6d83c2a85de",
-    "tests/test_voice_stability.py": "d359b8a49ac9999ec3ecac183a78be093534199fe8f99e9a9ec17bb8e69c6f21",
+    "tests/test_voice_stability.py": "ad69dffbe966fe6b4cc7a830376f62d29a759830920cb64b0afb47751eb88ed0",
     "tests/test_workflow_audit.py": "e0aad0b2b85580e6e5c2e7798bcad66591ccbf6507db49336a125fdf96757859",
     "tests/test_zapret.py": "8cfa4080a9162c48bb19654c40f7959632f9fef5b307790bdf9354e8a422a3af",
     "uninstall.command": "e69be136f623628a688285e128439769513f82cae7ec4fab55f6617f40a15f98",
     "voice.command": "d670a46b697eadc18c7523ecdcf25fab6db5334ed73180df10651773323b6643",
-    "voice_controller.py": "f0aa04369ab38174ed6f64e286ef78b6b592ba3ab84617043d9323ef1e52f0fb",
+    "voice_controller.py": "fcd2a87a9b2c978f59b72bb45f634407acb788611624a9d38d74f24b24aafc5b",
     "zapret.py": "89c708b95b50c5f08e86e961193ca60bc82be45fbac283b8a8d28ea9e42c639e"
   },
   "macos_udp_pf_tested": true,
@@ -123,7 +123,7 @@
     "python_39_syntax_files": 25,
     "bash_syntax_launchers": 4,
     "native_macos_checks": "Executed on GitHub macOS 14 and 15: 193 Python tests per OS, universal build, 10261 parser sanitizer cases, address-copy regression, 16 SOCKS and 16 transparent PF HTTP/TLS sanitizer transport cases, engine listener ownership, 100 engine configurations, 16 PF syntax checks, PF ABI and complete IPv4 UDP PF path passed; IPv6 disabled after failed route probe.",
-    "python_tests_platform": "Windows (199 run, 4 skipped)",
+    "python_tests_platform": "Windows (200 run, 5 skipped)",
     "macos_ci": {
       "commit": "8da48079d72a384a657972501e1310e94ae34257",
       "run_url": "https://github.com/Owl170/zapret-mac/actions/runs/37778643443",
@@ -152,12 +152,12 @@
       "tcp_transparent_pf_transport_cases": 16,
       "address_copy_sanitizer_regression": "passed"
     },
-    "python_tests_run": 199,
-    "python_tests_skipped": 4,
+    "python_tests_run": 200,
+    "python_tests_skipped": 5,
     "windows_tests": {
-      "run": 199,
+      "run": 200,
       "passed": 195,
-      "skipped": 4
+      "skipped": 5
     }
   },
   "discord_udp_payload_source": "https://github.com/Flowseal/zapret-discord-youtube/blob/1.10.3/bin/ACTIVE_DISCORD_UDP.bin",

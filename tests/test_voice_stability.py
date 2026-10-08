@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import socket
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,6 +15,32 @@ DISCOVERY = b'\x00\x01\x00\x46' + struct.pack('!I', 123) + bytes(66)
 
 
 class VoiceStabilityTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == 'win32', 'Needs a real POSIX descriptor limit')
+    def test_low_descriptor_limit_still_accepts_new_voice_sessions(self):
+        code = '''
+import resource, socket
+import discord_udp as u
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+    server.bind(('127.0.0.1', 0)); server.settimeout(2)
+    relay = u.Relay(lambda *args: server.getsockname(), profile='relay', allow_local_test=True)
+    try:
+        address = relay.listen(('127.0.0.1', 0))
+        for _ in range(48):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.sendto(b'\\x00\\x01\\x00\\x46' + bytes(70), address)
+                relay.step(timeout=1)
+                server.recvfrom(4096)
+        assert relay.stats['forwarded'] == 48
+        assert relay.stats['socket_errors'] == 0
+        assert len(relay.sessions) < 48
+        assert relay.stats['capacity_closed'] > 0
+    finally:
+        relay.close()
+'''
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def setUp(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(self.server.close)
@@ -84,6 +112,7 @@ class VoiceStabilityTests(unittest.TestCase):
             self.relay.snapshot(force=True)
             state = json.loads(self.relay.status_path.read_text())
         self.assertEqual(state['preserved_sessions'], 1)
+        self.assertEqual(state['session_limit'], 2)
         detail = state['session_details'][0]
         self.assertEqual(detail['local_port'], peer[1])
         self.assertEqual(detail['sent'], 1)

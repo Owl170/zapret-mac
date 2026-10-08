@@ -259,7 +259,8 @@ def show_status(root=z.ROOT):
               mode.get('ipv6_error') or 'нет маршрута IPv6 по умолчанию.')
     print('Пакеты к relay / в сеть / обратно:', status.get('received', 0), '/', status.get('forwarded', 0), '/', status.get('replies', 0))
     print('Discovery / STUN / фейки:', status.get('discoveries', 0), '/', status.get('stun', 0), '/', status.get('fakes', 0))
-    print('UDP-сессии / с сохранением порта:', status.get('sessions', 0), '/', status.get('preserved_sessions', 0))
+    print('UDP-сессии / с сохранением порта / лимит:', status.get('sessions', 0), '/',
+          status.get('preserved_sessions', 0), '/', status.get('session_limit', '—'))
     print('Закрытия сессий: простой / лимит / смена сервера:',
           status.get('idle_closed', 0), '/', status.get('capacity_closed', 0), '/', status.get('endpoint_closed', 0))
     print('Ошибка:', mode.get('error') or status.get('last_error') or '—')

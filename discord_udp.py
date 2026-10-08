@@ -163,6 +163,16 @@ class Relay:
         self.allow_local_test = allow_local_test
         self.idle = idle
         self.max_sessions = max_sessions
+        try:
+            import resource
+        except ImportError:
+            pass  # The local Windows test harness has no POSIX descriptor limit.
+        else:
+            soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft != resource.RLIM_INFINITY:
+                # Retained voice sockets must leave space for listeners, PF,
+                # the selector and atomic status writes on low-limit macOS.
+                self.max_sessions = min(max_sessions, max(1, soft - 32))
         self.exclusions = [ipaddress.ip_network(item) for item in exclusions]
         self.selector = selectors.DefaultSelector()
         self.listeners = []
@@ -177,7 +187,7 @@ class Relay:
                           last_endpoint='', last_packet='', last_reply_at=0,
                           last_forward_at=0, session_created=0, session_closed=0,
                           idle_closed=0, capacity_closed=0, endpoint_closed=0,
-                          last_session_close={})
+                          last_session_close={}, session_limit=self.max_sessions)
 
     def listen(self, address, family=socket.AF_INET):
         listener = socket.socket(family, socket.SOCK_DGRAM)
