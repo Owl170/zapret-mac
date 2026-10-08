@@ -33,6 +33,19 @@ def select(root=z.ROOT):
     with z.control_lock(root):
         previous = z.config(root)
         was_running = z.is_running(root)
+        def accept(name, rows):
+            nonlocal committed
+            report.update(accepted=True, selected=name)
+            try:
+                z.write_json(path, report)
+                z.write_json(root / 'runtime' / 'strategy-selection.json', report)
+            except BaseException:
+                report.update(accepted=False, selected=None)
+                raise
+            committed = True
+            print('Сохранена и включена стратегия:', name, flush=True)
+            print('Проверены страница, JavaScript, API, WebSocket и доступ к обновлению Discord; '
+                  'вход в аккаунт, голос и видео требуют проверки в приложении.')
         try:
             names = list(z.strategies(root))
             # Keep the current profile on ties; prefer a simple baseline next.
@@ -64,14 +77,11 @@ def select(root=z.ROOT):
                 rows = z.network_tests(root, quiet=True)
                 report['confirmation'].append(dict(strategy=name, rows=rows))
                 if complete(rows):
-                    report.update(accepted=True, selected=name)
-                    z.write_json(path, report)
-                    z.write_json(root / 'runtime' / 'strategy-selection.json', report)
-                    committed = True
-                    print('Сохранена и включена стратегия:', name, flush=True)
-                    print('Проверены страница, JavaScript, API, WebSocket и доступ к обновлению Discord; '
-                          'вход в аккаунт, голос и видео требуют проверки в приложении.')
+                    accept(name, rows)
                     return True
+            from discord_recovery import recover
+            if recover(root, previous, report, accept):
+                return True
             print('Ни один профиль не подтвердил все этапы подключения и обновления Discord.')
             return False
         except BaseException as error:
@@ -81,6 +91,8 @@ def select(root=z.ROOT):
             if not committed:
                 report['accepted'] = False
                 report['selected'] = None
+                if 'endpoint_recovery' in report:
+                    report['endpoint_recovery']['accepted'] = False
                 def restore():
                     z.write_json(root / 'config.json', previous)
                     if was_running:

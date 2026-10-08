@@ -925,12 +925,14 @@ def targets(root=ROOT):
     return rows
 
 
-def discord_tests(families=False):
+def discord_tests(families=False, app_ip=None):
     from discord_probe import CHECKS, FAMILY_CHECKS
-    checks = FAMILY_CHECKS if families else CHECKS
+    checks = CHECKS[:2] if app_ip is not None else (FAMILY_CHECKS if families else CHECKS)
     args = [sys.executable, str(Path(__file__).with_name('discord_probe.py'))]
     if families:
         args.append('--families')
+    if app_ip is not None:
+        args += ['--app-ip', str(app_ip)]
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         args = ['/usr/bin/sudo', '-u', '#' + str(original_user().pw_uid), '--'] + args
     try:
@@ -1109,7 +1111,8 @@ def install(binary, source=SOURCE, root=ROOT):
     folders = ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads')
     copies = [(source / name, root / name, 0o644)
               for name in ('zapret.py', 'discord_udp.py', 'discord_probe.py', 'voice_controller.py', 'discord_cache.py',
-                           'strategy_picker.py', 'strategies.json', 'VERSION', 'targets.txt')]
+                           'strategy_picker.py', 'application_update.py', 'discord_recovery.py',
+                           'strategies.json', 'VERSION', 'targets.txt')]
     copies += [(Path(binary), root / 'bin' / 'tpws', 0o755),
                (source / 'payloads' / 'discord-fake.bin', root / 'payloads' / 'discord-fake.bin', 0o644)]
     for folder in ('lists', 'licenses'):
@@ -1215,8 +1218,11 @@ def uninstall(root=ROOT):
     stop(root)
     PLIST.unlink(missing_ok=True)
     manage_hosts(False, root)
+    from discord_recovery import remove_override
+    remove_override(root)
     for path in (root / 'bin' / 'tpws', root / 'zapret.py', root / 'discord_udp.py', root / 'voice_controller.py',
                  root / 'discord_cache.py', root / 'discord_probe.py', root / 'strategy_picker.py',
+                 root / 'application_update.py', root / 'discord_recovery.py',
                  root / 'strategies.json', root / 'targets.txt', root / 'VERSION'):
         path.unlink(missing_ok=True)
     print('Движок и автозапуск удалены. Настройки, списки и резервные копии сохранены в:', root)
@@ -1283,7 +1289,8 @@ def menu(root=ROOT):
         print('\n1. Подключить / перезапустить\n2. Остановить\n'
               '3. Автоматически подобрать стратегию\n4. Голос Discord\n'
               '5. Очистить кэш Discord\n6. Проверить подключение\n'
-              f'7. Автозапуск [{"включён" if PLIST.exists() else "выключен"}]\n0. Выход')
+              f'7. Автозапуск [{"включён" if PLIST.exists() else "выключен"}]\n'
+              '8. Обновить ZapretMac\n0. Выход')
         try:
             choice = input('Выберите пункт: ').strip()
             if choice == '0':
@@ -1307,6 +1314,11 @@ def menu(root=ROOT):
             elif choice == '7':
                 with control_lock(root):
                     autostart(not PLIST.exists(), root)
+            elif choice == '8':
+                from application_update import update
+                if update(root):
+                    # All imports must come from the newly installed release.
+                    os.execv(sys.executable, [sys.executable, str(root / 'zapret.py'), 'menu'])
             else:
                 print('Неизвестный пункт.')
         except (Error, OSError, ValueError, subprocess.TimeoutExpired, urllib.error.URLError) as error:
@@ -1320,9 +1332,13 @@ def main():
                         'restart', 'status', 'autostart-on', 'autostart-off', 'update-lists',
                         'check-updates', 'hosts-apply', 'hosts-remove', 'diagnostics',
                         'test-sites', 'test-strategies', 'cache-discord', 'plan',
-                        'voice-menu', 'voice-status', 'voice-observe', 'auto-strategy', 'choose-strategy'])
+                        'voice-menu', 'voice-status', 'voice-observe', 'auto-strategy', 'choose-strategy',
+                        'update-app'])
     parser.add_argument('--engine', type=Path)
+    parser.add_argument('--update', action='store_true', help='Install only a newer release (updater)')
     args = parser.parse_args()
+    if args.update and args.command != 'install':
+        parser.error('--update поддерживается только для install')
     if args.command == 'plan':
         cfg = config(SOURCE)
         with tempfile.TemporaryDirectory(prefix='zapret-plan-') as temp:
@@ -1344,16 +1360,23 @@ def main():
     from voice_controller import voice_menu, show_status, observe
     from strategy_picker import select
     commands['auto-strategy'] = select
+    from application_update import update
+    commands['update-app'] = update
     commands.update({'voice-menu': voice_menu, 'voice-status': show_status, 'voice-observe': observe})
     if args.command == 'install':
         if not args.engine or not args.engine.is_file():
             raise Error('Укажите существующий tpws через --engine.')
         with control_lock(ROOT) if ROOT.exists() else contextlib.nullcontext():
+            if args.update:
+                from application_update import version_tuple
+                if version_tuple(version(ROOT)) >= version_tuple(version(SOURCE)):
+                    print('Уже установлена актуальная версия ZapretMac: ' + version(ROOT) + '.')
+                    return
             resume = install(args.engine)
         configure_install(resume=resume)
     else:
         read_or_interactive = {'supervise', 'menu', 'voice-menu', 'voice-status', 'voice-observe',
-                               'status', 'diagnostics', 'test-sites', 'check-updates', 'auto-strategy'}
+                               'status', 'diagnostics', 'test-sites', 'check-updates', 'auto-strategy', 'update-app'}
         with contextlib.nullcontext() if args.command in read_or_interactive else control_lock(ROOT):
             commands[args.command]()
 
