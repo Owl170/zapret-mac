@@ -49,6 +49,10 @@ def select(root=z.ROOT):
                 application = sum(r.get('application_ok') is True for r in rows if r['name'] in CHECKS)
                 print(f'{name}: Discord TLS {discord}/4, приложение и обновление {application}/{len(CHECKS)}, '
                       f'всего ответов {rank(rows)[1]}/{len(rows)}', flush=True)
+                missing = [r['name'] for r in rows if (r['name'] in REQUIRED and not r['tls_reached'])
+                           or (r['name'] in CHECKS and r.get('application_ok') is not True)]
+                if missing:
+                    print('Не прошли:', ', '.join(missing), flush=True)
                 if complete(rows):
                     candidates.append((name, rows))
             # Stable sorting preserves the tie preference above.
