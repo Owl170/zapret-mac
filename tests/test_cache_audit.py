@@ -27,6 +27,7 @@ class CacheAuditTests(unittest.TestCase):
         # This boundary is essential: root must never rename directly inside
         # the user-controlled directory tree. Execute the child in isolation.
         self.assertEqual(args[:5], ['/usr/bin/sudo', '-u', '#501', '--', sys.executable])
+        self.assertIsNone(kwargs['timeout'], 'The parent must let the child finish its rollback')
         return subprocess.run([str(a) for a in args[4:]], check=True,
                               capture_output=True, text=True)
 

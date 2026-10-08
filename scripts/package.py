@@ -11,7 +11,8 @@ import tempfile
 import zipfile
 
 NAMES = ['README.md', 'AUDIT.md', 'LICENSE', 'THIRD_PARTY.md', 'VERSION', 'PROVENANCE.json',
-         'strategies.json', 'targets.txt', 'zapret.py', 'discord_udp.py', 'voice_controller.py', 'install.command',
+         'strategies.json', 'targets.txt', 'zapret.py', 'discord_udp.py', 'voice_controller.py',
+         'discord_cache.py', 'strategy_picker.py', 'install.command',
          'service.command', 'uninstall.command', 'engine', 'licenses', 'lists',
          'voice.command', 'VOICE.md', 'payloads', 'native', 'scripts', 'tests', '.github', '.gitattributes', '.gitignore']
 ENGINE_OUTPUTS = {'engine/tpws/' + name + suffix
