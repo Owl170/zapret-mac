@@ -5,7 +5,6 @@ import ipaddress
 import os
 from pathlib import Path
 import shutil
-import socket
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -128,40 +127,32 @@ class StableControllerTests(unittest.TestCase):
                 self.assertEqual((cache / 'entry').read_bytes(), b'preserve active cache')
                 self.assertEqual(list(cache.parent.glob('Cache.zapret-backup-*')), [])
 
-    def tcp_listener(self):
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.addCleanup(listener.close)
-        try:
-            listener.bind(('127.0.0.1', 988))
-        except OSError as error:
-            self.skipTest('Port 988 is already in use: ' + str(error))
-        listener.listen(8)
-        return listener
-
     def test_open_foreign_listener_cannot_make_engine_ready(self):
-        self.tcp_listener()
         child = Mock(pid=123)
         child.poll.return_value = None
         foreign = SimpleNamespace(returncode=0, stdout='p999\nf3\nn127.0.0.1:988\n')
-        with patch.object(z, 'run', return_value=foreign), \
+        # Port 988 needs root on macOS. Model an accepted connection here;
+        # sudo check_native.py covers the actual socket and lsof integration.
+        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+                patch.object(z, 'run', return_value=foreign), \
                 patch.object(z.time, 'monotonic', side_effect=[0, 0, 1]), patch.object(z.time, 'sleep'):
             with self.assertRaises(z.Error):
                 z.wait_ready(child, timeout=0.5)
 
     def test_engine_readiness_requires_its_exact_local_listener(self):
-        self.tcp_listener()
         child = Mock(pid=123)
         child.poll.return_value = None
         owned = SimpleNamespace(returncode=0, stdout='p123\nf4\nn127.0.0.1:988\n')
-        with patch.object(z, 'run', return_value=owned):
+        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+                patch.object(z, 'run', return_value=owned):
             z.wait_ready(child, timeout=0.5)
 
     def test_child_exit_during_listener_inventory_cannot_make_engine_ready(self):
-        self.tcp_listener()
         child = Mock(pid=123)
         child.poll.side_effect = [None, 1]
         owned = SimpleNamespace(returncode=0, stdout='p123\nf4\nn127.0.0.1:988\n')
-        with patch.object(z, 'run', return_value=owned), self.assertRaises(z.Error):
+        with patch.object(z.socket, 'create_connection', return_value=contextlib.nullcontext()), \
+                patch.object(z, 'run', return_value=owned), self.assertRaises(z.Error):
             z.wait_ready(child, timeout=0.5)
 
     @unittest.skipUnless(os.name == 'posix', 'Needs POSIX directory permission bits')
