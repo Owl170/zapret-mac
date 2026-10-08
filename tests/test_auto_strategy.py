@@ -101,7 +101,7 @@ class AutoStrategyTests(unittest.TestCase):
             name = z.config(self.root)['strategy']
             rows = self.rows(picker.REQUIRED, youtube=True)
             if name != 'tlsrec-disorder':
-                rows[-1]['application_ok'] = False
+                next(r for r in rows if r['name'] == 'DiscordWebSocket')['application_ok'] = False
             return rows
         self.assertTrue(self.run_picker(probe))
         self.assertEqual(z.config(self.root)['strategy'], 'tlsrec-disorder')
@@ -112,6 +112,34 @@ class AutoStrategyTests(unittest.TestCase):
             z.connect(self.root)
         select.assert_called_once_with(self.root)
         restart.assert_not_called()
+
+    def test_current_confirmation_is_rechecked_and_bad_network_retunes(self):
+        z.write_json(self.root / 'runtime/strategy-selection.json',
+                     dict(schema=SCHEMA, accepted=True, selected=self.saved['strategy']))
+        with patch.object(picker, 'select') as select, patch.object(z, 'restart') as restart, \
+                patch.object(z, 'network_tests', return_value=self.rows()):
+            z.connect(self.root)
+        restart.assert_called_once_with(self.root)
+        select.assert_called_once_with(self.root)
+
+    def test_current_confirmation_that_still_passes_does_not_retune(self):
+        z.write_json(self.root / 'runtime/strategy-selection.json',
+                     dict(schema=SCHEMA, accepted=True, selected=self.saved['strategy']))
+        with patch.object(picker, 'select') as select, patch.object(z, 'restart') as restart, \
+                patch.object(z, 'network_tests', return_value=self.rows(picker.REQUIRED)):
+            z.connect(self.root)
+        restart.assert_called_once_with(self.root)
+        select.assert_not_called()
+
+    def test_app_success_with_blocked_update_file_cannot_win(self):
+        def probe(*args, **kwargs):
+            name = z.config(self.root)['strategy']
+            rows = self.rows(picker.REQUIRED)
+            if name != 'tlsrec':
+                next(r for r in rows if r['name'] == 'DiscordUpdateDownload')['application_ok'] = False
+            return rows
+        self.assertTrue(self.run_picker(probe))
+        self.assertEqual(z.config(self.root)['strategy'], 'tlsrec')
 
     def test_partial_http_200_is_tls_success_but_incomplete_download(self):
         from types import SimpleNamespace

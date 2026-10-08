@@ -890,11 +890,16 @@ def clean_discord_cache(root=ROOT):
     return report
 
 
-def curl_test(target):
+def curl_test(target, family=None):
     name, url = target
     args = ['/usr/bin/curl', '--http1.1', '--noproxy', '*', '--connect-timeout', '5',
             '--max-time', '12', '--silent', '--show-error', '--output', '/dev/null',
             '--write-out', '%{http_code} %{time_total}', '--range', '0-0', url]
+    if family is not None:
+        if family not in (4, 6):
+            raise Error('Для проверки нужен IPv4 или IPv6.')
+        args.insert(1, '--ipv' + str(family))
+        name += 'IPv' + str(family)
     # Transparent PF intentionally exempts root, so tests must use the invoking user.
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         args = ['/usr/bin/sudo', '-u', '#' + str(original_user().pw_uid), '--'] + args
@@ -943,6 +948,37 @@ def discord_tests():
                      application_ok=False, error=str(error)) for name in CHECKS]
 
 
+def connection_details(root, rows):
+    """Read-only family/hosts diagnostics; never used as a strategy score."""
+    from strategy_picker import REQUIRED
+    failed = [(r['name'], r['url']) for r in rows if r['name'] in REQUIRED and not r['tls_reached']]
+    if not failed:
+        return
+    print('Discord недоступен. Сравниваем IPv4 и IPv6; настройки сети не меняются…', flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        tasks = [pool.submit(curl_test, target, family) for target in failed for family in (4, 6)]
+        families = [task.result() for task in tasks]
+    for result in families:
+        print(f'{result["name"]:24} HTTP {result["http"]}: '
+              + ('TLS получен' if result['tls_reached'] else result['error']))
+    hosts = []
+    try:
+        for line in HOSTS.read_text().splitlines():
+            parts = line.split('#', 1)[0].split()
+            if len(parts) >= 2 and any(re.search(r'(^|\.)discord(?:app)?\.(?:com|net|gg)$', v.lower().rstrip('.'))
+                                       for v in parts[1:]):
+                hosts.append(' '.join(parts))
+        print('Записи Discord в /etc/hosts:', '\n' + '\n'.join(hosts[:20]) if hosts else 'нет')
+    except OSError as error:
+        print('Не удалось прочитать /etc/hosts:', error)
+    path = root / 'logs' / ('connection-' + stamp() + '.json')
+    try:
+        write_json(path, dict(checks=rows, families=families, discord_hosts=hosts))
+        print('Отчёт подключения:', path)
+    except OSError as error:
+        print('Не удалось сохранить отчёт подключения:', error)
+
+
 def network_tests(root=ROOT, quiet=False):
     require_mac()
     if not quiet:
@@ -963,8 +999,10 @@ def network_tests(root=ROOT, quiet=False):
                 detail = row['error']
             print(f'{row["name"]:24} HTTP {row["http"]:3}  {row["seconds"]} s  '
                   + detail)
-        print('Проверены TLS, страница, один JavaScript, публичный API и WebSocket Hello Discord. '
-              'Вход в аккаунт, голос и воспроизведение видео не проверяются.')
+        print('Проверены TLS, страница, один JavaScript, API, WebSocket Hello и серверы обновлений Discord. '
+              'Из файлов обновления прочитан только первый 1 КиБ; установка обновления, '
+              'вход в аккаунт, голос и видео не проверяются.')
+        connection_details(root, rows)
     return rows
 
 
@@ -1187,7 +1225,7 @@ def choose_strategy(root=ROOT):
 
 
 def connect(root=ROOT):
-    from strategy_picker import select
+    from strategy_picker import complete, select
     from discord_probe import SCHEMA
     cfg = config(root)
     try:
@@ -1198,6 +1236,11 @@ def connect(root=ROOT):
             and saved.get('accepted') is True and saved.get('selected') == cfg['strategy']):
         with control_lock(root):
             restart(root)
+            print('Проверяем сохранённую стратегию в текущей сети…', flush=True)
+            if complete(network_tests(root, quiet=True)):
+                return
+        print('Сохранённая стратегия не прошла проверку. Запускаем новый подбор.', flush=True)
+        select(root)
     else:
         select(root)
 

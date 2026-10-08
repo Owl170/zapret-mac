@@ -401,6 +401,9 @@ def voice_menu(root=z.ROOT):
                 change_voice(root, enabled=False)
             elif choice == '5':
                 tune(root)
+            elif choice == '6':
+                print('Проверка подключения — пункт 6 в основном меню service.command. '
+                      'Нажмите Enter, затем 0, чтобы выйти из меню голоса.')
             else:
                 print('Неизвестный пункт.')
         except (z.Error, OSError, ValueError, subprocess.TimeoutExpired) as error:

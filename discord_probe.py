@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -15,8 +16,13 @@ from urllib.parse import urlsplit
 APP = 'https://discord.com/app'
 API = 'https://discord.com/api/v10/gateway'
 WS = 'wss://gateway.discord.gg/?v=10&encoding=json'
-CHECKS = ('DiscordApp', 'DiscordScript', 'DiscordAPI', 'DiscordWebSocket')
-SCHEMA = 2
+UPDATE_API = 'https://discord.com/api/updates/stable?platform=osx'
+UPDATE_MANIFEST = ('https://updates.discord.com/distributions/app/manifests/latest'
+                   '?channel=stable&platform=osx&arch=universal')
+UPDATE_HOST = 'stable.dl2.discordapp.net'
+CHECKS = ('DiscordApp', 'DiscordScript', 'DiscordAPI', 'DiscordWebSocket',
+          'DiscordUpdateAPI', 'DiscordUpdateManifest', 'DiscordUpdateDownload')
+SCHEMA = 3
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 
@@ -31,21 +37,29 @@ def remaining(deadline):
     return min(5, value)
 
 
-def fetch(url, limit):
+def fetch(url, limit, prefix=False):
     parsed = urlsplit(url)
-    if parsed.scheme != 'https' or parsed.netloc != 'discord.com' or parsed.fragment:
+    hosts = (UPDATE_HOST,) if prefix else ('discord.com', 'updates.discord.com')
+    if parsed.scheme != 'https' or parsed.netloc not in hosts or parsed.fragment:
         raise ProbeError('Неподдерживаемый адрес проверки')
     deadline = time.monotonic() + 20
-    conn = http.client.HTTPSConnection('discord.com', timeout=5, context=ssl.create_default_context())
+    conn = http.client.HTTPSConnection(parsed.netloc, timeout=5, context=ssl.create_default_context())
     response = None
     try:
+        headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity', 'Connection': 'close'}
+        if prefix:
+            headers['Range'] = f'bytes=0-{limit-1}'
         conn.request('GET', parsed.path + ('?' + parsed.query if parsed.query else ''),
-                     headers={'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity',
-                              'Connection': 'close'})
+                     headers=headers)
         response = conn.getresponse()
-        if response.status != 200:
+        if response.status != (206 if prefix else 200):
             raise ProbeError(f'HTTP {response.status}')
         length = response.length
+        if prefix:
+            match = re.fullmatch(r'bytes 0-([0-9]+)/([0-9]+)', response.getheader('Content-Range', ''))
+            if (not match or int(match[1]) != limit - 1 or int(match[2]) < limit
+                    or length != limit):
+                raise ProbeError('Сервер не подтвердил запрошенную часть файла обновления')
         if length is not None and length > limit:
             raise ProbeError('Ответ превышает лимит проверки')
         result = bytearray()
@@ -76,7 +90,6 @@ class Scripts(HTMLParser):
         self.urls = []
 
     def handle_starttag(self, tag, attrs):
-        import re
         src = dict(attrs).get('src') or ''
         if tag == 'script' and re.fullmatch(r'/assets/[A-Za-z0-9_.-]+\.js', src):
             self.urls.append('https://discord.com' + src)
@@ -123,6 +136,58 @@ def api_check():
     url = value.get('url')
     if not isinstance(url, str) or url.rstrip('/') != 'wss://gateway.discord.gg':
         raise ProbeError('API не вернул ожидаемый адрес шлюза')
+
+
+def update_checks():
+    downloads = {}
+
+    def metadata(url, modern):
+        data, kind = fetch(url, 512 * 1024)
+        value = json.loads(data)
+        if kind != 'application/json' or not isinstance(value, dict):
+            raise ProbeError('Сервер обновлений не вернул JSON')
+        if modern:
+            full = value.get('full')
+            if not isinstance(full, dict):
+                raise ProbeError('В манифесте нет полного обновления')
+            version = full.get('host_version')
+            if (not isinstance(version, list) or len(version) != 3
+                    or any(type(v) is not int or not 0 <= v <= 1000000 for v in version)
+                    or not isinstance(full.get('package_sha256'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', full['package_sha256'])):
+                raise ProbeError('Некорректная версия или хеш обновления')
+            version = '.'.join(map(str, version))
+            expected = f'https://{UPDATE_HOST}/distro/app/stable/osx/universal/{version}/full.distro'
+            target = full.get('url')
+        else:
+            version = value.get('name')
+            if not isinstance(version, str) or not re.fullmatch(r'[0-9]{1,7}\.[0-9]{1,7}\.[0-9]{1,7}', version):
+                raise ProbeError('Некорректная версия обновления')
+            expected = f'https://{UPDATE_HOST}/apps/osx/{version}/Discord.zip'
+            target = value.get('url')
+        # Never follow untrusted redirects or arbitrary URLs from a manifest.
+        if target != expected:
+            raise ProbeError('Манифест вернул неожиданный адрес файла обновления')
+        downloads[modern] = target
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        legacy = pool.submit(row, CHECKS[4], UPDATE_API, lambda: metadata(UPDATE_API, False))
+        modern = pool.submit(row, CHECKS[5], UPDATE_MANIFEST, lambda: metadata(UPDATE_MANIFEST, True))
+        results = [legacy.result(), modern.result()]
+    if len(downloads) != 2:
+        return results + [dict(name=CHECKS[6], url='', http='---', seconds='0',
+                               tls_reached=False, application_ok=False,
+                               error='Сначала нужны корректные ответы серверов обновлений')]
+
+    def prefixes():
+        def check(url):
+            data, kind = fetch(url, 1024, prefix=True)
+            if len(data) != 1024 or kind not in ('application/octet-stream', 'application/zip', 'application/x-zip-compressed'):
+                raise ProbeError('Вместо файла обновления получен неполный или другой ответ')
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            for result in pool.map(check, (downloads[False], downloads[True])):
+                pass
+    return results + [row(CHECKS[6], downloads[True], prefixes, '206')]
 
 
 def send_control(sock, opcode, payload):
@@ -226,11 +291,12 @@ def websocket_check():
 
 
 def probes():
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         app = pool.submit(app_checks)
         api = pool.submit(row, CHECKS[2], API, api_check)
         ws = pool.submit(row, CHECKS[3], WS, websocket_check, '101')
-        return app.result() + [api.result(), ws.result()]
+        updates = pool.submit(update_checks)
+        return app.result() + [api.result(), ws.result()] + updates.result()
 
 
 if __name__ == '__main__':

@@ -47,7 +47,7 @@ def select(root=z.ROOT):
                 report['trials'].append(dict(strategy=name, rows=rows))
                 discord = sum(r['tls_reached'] is True for r in rows if r['name'] in REQUIRED)
                 application = sum(r.get('application_ok') is True for r in rows if r['name'] in CHECKS)
-                print(f'{name}: Discord TLS {discord}/4, приложение {application}/4, '
+                print(f'{name}: Discord TLS {discord}/4, приложение и обновление {application}/{len(CHECKS)}, '
                       f'всего ответов {rank(rows)[1]}/{len(rows)}', flush=True)
                 if complete(rows):
                     candidates.append((name, rows))
@@ -65,10 +65,10 @@ def select(root=z.ROOT):
                     z.write_json(root / 'runtime' / 'strategy-selection.json', report)
                     committed = True
                     print('Сохранена и включена стратегия:', name, flush=True)
-                    print('Проверены страница, JavaScript, API и WebSocket Discord; '
+                    print('Проверены страница, JavaScript, API, WebSocket и доступ к обновлению Discord; '
                           'вход в аккаунт, голос и видео требуют проверки в приложении.')
                     return True
-            print('Ни один профиль не подтвердил адреса и все четыре этапа загрузки Discord.')
+            print('Ни один профиль не подтвердил все этапы подключения и обновления Discord.')
             return False
         except BaseException as error:
             failure = error
