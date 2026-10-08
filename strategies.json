@@ -4,6 +4,10 @@
   "split-small": {"title": "Короткие первые TCP-сегменты", "args": ["--split-pos=1,2", "--hostcase"]},
   "tlsrec": {"title": "Разбиение TLS-записи", "args": ["--tlsrec=midsld", "--split-pos=1", "--hostcase"]},
   "tlsrec-disorder": {"title": "TLS-запись и порядок TCP", "args": ["--tlsrec=midsld", "--split-pos=1,midsld", "--disorder", "--hostcase"]},
+  "tlsrec-first": {"title": "TLS-запись после первого байта ClientHello", "args": ["--tlsrec=6", "--split-pos=1", "--hostcase"]},
+  "tlsrec-sni": {"title": "TLS-запись внутри расширения SNI", "args": ["--tlsrec=sniext+1", "--split-pos=1,midsld", "--hostcase"]},
+  "tlsrec-host": {"title": "TLS-запись после первого символа домена", "args": ["--tlsrec=host+1", "--split-pos=1,midsld", "--hostcase"]},
+  "split-sni": {"title": "TCP-разбиение расширения SNI и домена", "args": ["--split-pos=1,sniext+1,host+1,midsld", "--hostcase"]},
   "oob": {"title": "Разбиение с TCP OOB", "args": ["--split-pos=midsld", "--oob", "--hostcase"]},
   "http-eol": {"title": "HTTP EOL и разбиение TLS", "args": ["--split-pos=1,midsld", "--methodeol", "--hostcase"]},
   "passthrough": {"title": "Контрольный профиль без изменения данных", "args": []}

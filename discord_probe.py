@@ -10,6 +10,7 @@ import re
 import socket
 import ssl
 import struct
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -23,6 +24,7 @@ UPDATE_HOST = 'stable.dl2.discordapp.net'
 CHECKS = ('DiscordApp', 'DiscordScript', 'DiscordAPI', 'DiscordWebSocket',
           'DiscordUpdateAPI', 'DiscordUpdateManifest', 'DiscordUpdateDownload')
 SCHEMA = 3
+FAMILY_CHECKS = tuple(name + 'IPv' + str(family) for family in (4, 6) for name in CHECKS[:2])
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 
@@ -37,13 +39,44 @@ def remaining(deadline):
     return min(5, value)
 
 
-def fetch(url, limit, prefix=False):
+def family_socket(address, timeout, source_address, family, trace):
+    error = None
+    for af, kind, protocol, _, target in socket.getaddrinfo(address[0], address[1],
+                                                          family, socket.SOCK_STREAM):
+        sock = None
+        try:
+            sock = socket.socket(af, kind, protocol)
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            trace.append(target[0])
+            sock.connect(target)
+            return sock
+        except OSError as failure:
+            error = failure
+            if sock is not None:
+                sock.close()
+    if error is not None:
+        raise error
+    raise OSError('DNS не вернул адресов выбранного семейства')
+
+
+def fetch(url, limit, prefix=False, family=None, trace=None):
     parsed = urlsplit(url)
     hosts = (UPDATE_HOST,) if prefix else ('discord.com', 'updates.discord.com')
     if parsed.scheme != 'https' or parsed.netloc not in hosts or parsed.fragment:
         raise ProbeError('Неподдерживаемый адрес проверки')
     deadline = time.monotonic() + 20
     conn = http.client.HTTPSConnection(parsed.netloc, timeout=5, context=ssl.create_default_context())
+    if family is not None:
+        if family not in (4, 6):
+            raise ProbeError('Для проверки нужен IPv4 или IPv6')
+        af = socket.AF_INET if family == 4 else socket.AF_INET6
+        addresses = trace if trace is not None else []
+        # HTTPConnection's socket factory keeps hostname/SNI/certificate checks
+        # intact while restricting DNS resolution to the requested family.
+        conn._create_connection = lambda address, timeout, source_address: family_socket(
+            address, timeout, source_address, af, addresses)
     response = None
     try:
         headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity', 'Connection': 'close'}
@@ -106,10 +139,11 @@ def row(name, url, operation, code='200'):
                 tls_reached=True, application_ok=True, error='')
 
 
-def app_checks():
+def app_checks(family=None):
     scripts = Scripts()
+    page_ips, script_ips = [], []
     def app():
-        data, kind = fetch(APP, 2 * 1024 * 1024)
+        data, kind = fetch(APP, 2 * 1024 * 1024, family=family, trace=page_ips)
         text = data.decode('utf-8')
         if kind != 'text/html' or '</html>' not in text.lower():
             raise ProbeError('Неполная HTML-страница приложения')
@@ -117,15 +151,30 @@ def app_checks():
         if not scripts.urls:
             raise ProbeError('Не найден JavaScript приложения')
     page = row(CHECKS[0], APP, app)
+    if family is not None:
+        page.update(name=page['name'] + 'IPv' + str(family), peer_ips=page_ips)
     if not page['application_ok']:
-        return [page, dict(name=CHECKS[1], url=APP, http='---', seconds='0',
-                           tls_reached=False, application_ok=False, error='Сначала нужна страница приложения')]
+        skipped = dict(name=CHECKS[1], url=APP, http='---', seconds='0',
+                       tls_reached=False, application_ok=False, error='Сначала нужна страница приложения')
+        if family is not None:
+            skipped.update(name=skipped['name'] + 'IPv' + str(family), peer_ips=[])
+        return [page, skipped]
     script = scripts.urls[0]
     def asset():
-        data, kind = fetch(script, 8 * 1024 * 1024)
+        data, kind = fetch(script, 8 * 1024 * 1024, family=family, trace=script_ips)
         if kind not in ('application/javascript', 'text/javascript', 'application/x-javascript') or not data.strip():
             raise ProbeError('Вместо JavaScript получен другой или пустой ответ')
-    return [page, row(CHECKS[1], script, asset)]
+    result = row(CHECKS[1], script, asset)
+    if family is not None:
+        result.update(name=result['name'] + 'IPv' + str(family), peer_ips=script_ips)
+    return [page, result]
+
+
+def app_family_checks():
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        ipv4 = pool.submit(app_checks, 4)
+        ipv6 = pool.submit(app_checks, 6)
+        return ipv4.result() + ipv6.result()
 
 
 def api_check():
@@ -300,4 +349,6 @@ def probes():
 
 
 if __name__ == '__main__':
-    print(json.dumps(probes(), ensure_ascii=False))
+    if sys.argv[1:] not in ([], ['--families']):
+        raise SystemExit('Usage: discord_probe.py [--families]')
+    print(json.dumps(app_family_checks() if sys.argv[1:] else probes(), ensure_ascii=False))

@@ -4,6 +4,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import socket
+import ssl
 import struct
 import subprocess
 import threading
@@ -11,7 +13,7 @@ import time
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import discord_probe as d
 import zapret as z
@@ -232,8 +234,97 @@ class HttpTests(unittest.TestCase):
         with self.assertRaises(d.ProbeError):
             d.fetch(self.server.legacy['url'], 1024)
 
+    def test_forced_ipv4_loads_full_app_and_script_without_changing_host(self):
+        rows = d.app_checks(4)
+        self.assertTrue(all(r['application_ok'] for r in rows))
+        self.assertEqual([r['name'] for r in rows], list(d.FAMILY_CHECKS[:2]))
+        self.assertEqual([r['peer_ips'] for r in rows], [['127.0.0.1'], ['127.0.0.1']])
+        self.assertEqual(rows[0]['url'], d.APP)
+        self.server.mode = 'partial'
+        self.assertFalse(d.app_checks(4)[0]['application_ok'])
+
+
+class FamilySocketTests(unittest.TestCase):
+    def test_tcp_failure_tries_next_ip_in_same_family_and_closes_failed_socket(self):
+        first, second = Mock(), Mock()
+        first.connect.side_effect = TimeoutError('connect timed out')
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 443))
+                     for ip in ('203.0.113.1', '203.0.113.2')]
+        trace = []
+        with patch.object(d.socket, 'getaddrinfo', return_value=addresses) as resolve, \
+                patch.object(d.socket, 'socket', side_effect=[first, second]):
+            result = d.family_socket(('discord.com', 443), 5, None, socket.AF_INET, trace)
+        self.assertIs(result, second)
+        resolve.assert_called_once_with('discord.com', 443, socket.AF_INET, socket.SOCK_STREAM)
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+        self.assertEqual(trace, ['203.0.113.1', '203.0.113.2'])
+
+    def test_no_ipv6_addresses_does_not_fall_back_to_ipv4(self):
+        with patch.object(d.socket, 'getaddrinfo', return_value=[]) as resolve, \
+                patch.object(d.socket, 'socket') as create:
+            with self.assertRaises(OSError):
+                d.family_socket(('discord.com', 443), 5, None, socket.AF_INET6, [])
+        self.assertEqual(resolve.call_args.args[2], socket.AF_INET6)
+        create.assert_not_called()
+
+    def test_forced_family_preserves_sni_and_certificate_validation_failure(self):
+        raw = Mock()
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.1', 443))]
+        with patch.object(d.socket, 'getaddrinfo', return_value=address), \
+                patch.object(d.socket, 'socket', return_value=raw), \
+                patch.object(ssl.SSLContext, 'wrap_socket', side_effect=ssl.SSLCertVerificationError('bad certificate')) as wrap:
+            rows = d.app_checks(4)
+        self.assertFalse(rows[0]['application_ok'])
+        self.assertIn('bad certificate', rows[0]['error'])
+        self.assertEqual(wrap.call_args.kwargs['server_hostname'], 'discord.com')
+        raw.close.assert_called_once()
+
 
 class ControllerProbeTests(unittest.TestCase):
+    def test_app_failure_with_all_base_tls_success_still_gets_family_diagnostics(self):
+        from strategy_picker import REQUIRED
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hosts = root / 'hosts'
+            hosts.write_text('127.0.0.1 localhost\n')
+            rows = [dict(name=n, url=d.APP, tls_reached=True) for n in REQUIRED]
+            rows += [dict(name='DiscordApp', url=d.APP, tls_reached=False, application_ok=False)]
+            family_rows = [dict(name=n, url=d.APP, http='---', seconds='5', error='TLS timeout',
+                                tls_reached=False, application_ok=False, peer_ips=['203.0.113.1']) for n in d.FAMILY_CHECKS]
+            with patch.object(z, 'HOSTS', hosts), patch.object(z, 'discord_tests', return_value=family_rows) as probes, \
+                    patch.object(z, 'curl_test') as curl:
+                z.connection_details(root, rows)
+            probes.assert_called_once_with(families=True)
+            curl.assert_not_called()
+            report = json.loads(next((root / 'logs').glob('connection-*.json')).read_text())
+            self.assertEqual(report['families'], family_rows)
+            self.assertEqual(report['checks'], rows)
+
+    def test_family_probe_process_is_unprivileged_and_has_separate_report_names(self):
+        rows = [dict(name=n, url='', http='200', seconds='0', error='',
+                     tls_reached=True, application_ok=True) for n in d.FAMILY_CHECKS]
+        with patch.object(z.os, 'geteuid', return_value=0, create=True), \
+                patch.object(z, 'original_user', return_value=SimpleNamespace(pw_uid=501)), \
+                patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))) as run:
+            self.assertEqual(z.discord_tests(families=True), rows)
+        self.assertEqual(run.call_args.args[0][:4], ['/usr/bin/sudo', '-u', '#501', '--'])
+        self.assertEqual(run.call_args.args[0][-1], '--families')
+
+    def test_family_probe_timeout_returns_failed_rows_for_both_families(self):
+        with patch.object(z.os, 'geteuid', return_value=501, create=True), \
+                patch.object(z, 'run', side_effect=subprocess.TimeoutExpired('probe', 60)):
+            rows = z.discord_tests(families=True)
+        self.assertEqual([r['name'] for r in rows], list(d.FAMILY_CHECKS))
+        self.assertFalse(any(r['application_ok'] for r in rows))
+
+    def test_family_probe_with_malformed_address_list_is_rejected(self):
+        rows = [dict(name=n, url='', http='200', seconds='0', error='', tls_reached=True,
+                     application_ok=True, peer_ips='not a list') for n in d.FAMILY_CHECKS]
+        with patch.object(z.os, 'geteuid', return_value=501, create=True), \
+                patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(rows))):
+            self.assertFalse(any(r['application_ok'] for r in z.discord_tests(families=True)))
+
     def test_family_diagnostics_use_user_requests_and_preserve_hosts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

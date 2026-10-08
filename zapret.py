@@ -574,7 +574,7 @@ def supervise(root=ROOT):
                 udp_backend.start(cfg, cancelled=lambda: stop_requested)
                 write_json(state_path, dict(pid=os.getpid(), engine_pid=child.pid,
                                            phase='running', strategy=cfg['strategy'], voice_udp=udp_backend.active))
-                print(f'Обход включён: {cfg["strategy"]}', flush=True)
+                print(f'Сервис запущен: {cfg["strategy"]}', flush=True)
                 while not stop_requested and child.poll() is None:
                     udp_backend.check()
                     time.sleep(0.25)
@@ -684,7 +684,7 @@ def start(root=ROOT):
     for _ in range(500):
         state = get_state(root)
         if state.get('phase') == 'running' and is_running(root):
-            print('Обход включён. Перезапустите уже открытые приложения/соединения.')
+            print('Сервис запущен. Перезапустите уже открытые приложения/соединения.')
             return
         if process and process.poll() is not None:
             break
@@ -925,9 +925,12 @@ def targets(root=ROOT):
     return rows
 
 
-def discord_tests():
-    from discord_probe import CHECKS
+def discord_tests(families=False):
+    from discord_probe import CHECKS, FAMILY_CHECKS
+    checks = FAMILY_CHECKS if families else CHECKS
     args = [sys.executable, str(Path(__file__).with_name('discord_probe.py'))]
+    if families:
+        args.append('--families')
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         args = ['/usr/bin/sudo', '-u', '#' + str(original_user().pw_uid), '--'] + args
     try:
@@ -935,32 +938,43 @@ def discord_tests():
         if result.returncode:
             raise Error('Проверки приложения завершились с ошибкой: ' + result.stderr.strip()[:300])
         rows = json.loads(result.stdout)
-        if (not isinstance(rows, list) or len(rows) != len(CHECKS)
-                or {r.get('name') for r in rows if isinstance(r, dict)} != set(CHECKS)
+        if (not isinstance(rows, list) or len(rows) != len(checks)
+                or {r.get('name') for r in rows if isinstance(r, dict)} != set(checks)
                 or any(not isinstance(r, dict)
                        or any(not isinstance(r.get(k), str) for k in ('name', 'url', 'http', 'seconds', 'error'))
                        or type(r.get('application_ok')) is not bool or type(r.get('tls_reached')) is not bool
+                       or (families and 'peer_ips' in r and (not isinstance(r['peer_ips'], list)
+                                                           or any(not isinstance(ip, str) for ip in r['peer_ips'])))
                        for r in rows)):
             raise Error('Некорректный отчёт проверок приложения')
         return rows
     except (Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
         return [dict(name=name, url='', http='---', seconds='?', tls_reached=False,
-                     application_ok=False, error=str(error)) for name in CHECKS]
+                     application_ok=False, error=str(error)) for name in checks]
 
 
 def connection_details(root, rows):
     """Read-only family/hosts diagnostics; never used as a strategy score."""
     from strategy_picker import REQUIRED
+    from discord_probe import CHECKS
     failed = [(r['name'], r['url']) for r in rows if r['name'] in REQUIRED and not r['tls_reached']]
-    if not failed:
+    app_failed = any(r['name'] in CHECKS and r.get('application_ok') is False for r in rows)
+    if not failed and not app_failed:
         return
     print('Discord недоступен. Сравниваем IPv4 и IPv6; настройки сети не меняются…', flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         tasks = [pool.submit(curl_test, target, family) for target in failed for family in (4, 6)]
+        app = pool.submit(discord_tests, families=True) if app_failed else None
         families = [task.result() for task in tasks]
+        if app is not None:
+            families += app.result()
     for result in families:
+        detail = (('Проверка пройдена' if result['application_ok'] else result['error'])
+                  if 'application_ok' in result else ('TLS получен' if result['tls_reached'] else result['error']))
         print(f'{result["name"]:24} HTTP {result["http"]}: '
-              + ('TLS получен' if result['tls_reached'] else result['error']))
+              + detail)
+        if result.get('peer_ips'):
+            print('  Адреса попыток подключения:', ', '.join(result['peer_ips']))
     hosts = []
     try:
         for line in HOSTS.read_text().splitlines():
