@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise every TCP strategy with real HTTP and TLS through a local SOCKS proxy."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import struct
@@ -14,7 +16,53 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import zapret as z
+from discord_udp import TEST4
+
 BODY = b'ZAPRETMAC_TRANSPORT_OK'
+ANCHOR = 'com.apple/zapret-macos-tcp-check'
+
+
+@contextlib.contextmanager
+def local_pf_fixture():
+    """Route only reserved TCP probes locally, preserving SOCKS local-IP guards."""
+    z.require_mac(True)
+    if z.ROOT.exists() and z.is_running():
+        raise z.Error('Stop ZapretMac before running the native transport check.')
+    if z.pf('-a', ANCHOR, '-sr').stdout.strip() or z.pf('-a', ANCHOR, '-sn').stdout.strip():
+        raise z.Error('Native TCP test anchor is already occupied.')
+    z.ensure_pf_hooks()
+    enabled = z.pf('-E')
+    token = re.search(r'Token\s*:\s*(\d+)', enabled.stdout + enabled.stderr)
+    if not token:
+        raise z.Error('PF enable token missing.')
+    failure = None
+    try:
+        yield
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        try:
+            z.cleanup_steps(lambda: z.pf('-a', ANCHOR, '-f', '-', input=''),
+                            lambda: z.pf('-X', token.group(1)))
+        except BaseException as error:
+            if failure is None:
+                raise
+            print('Additional TCP fixture cleanup error: ' + str(error), file=sys.stderr)
+
+
+def route_endpoint(endpoint):
+    # The official SOCKS engine rejects local destination addresses. Send to a
+    # reserved non-local address and let PF translate it to the local server.
+    # Keep state only at rdr, so reverse NAT returns the correct peer address.
+    rules = (f'rdr pass on lo0 inet proto tcp from !127.0.0.0/8 to {TEST4} '
+             f'port {endpoint} -> 127.0.0.1 port {endpoint}\n'
+             f'pass out route-to (lo0 127.0.0.1) inet proto tcp from !127.0.0.0/8 '
+             f'to {TEST4} port {endpoint} no state label "zmac-tcp-probe"\n')
+    z.pf('-n', '-a', ANCHOR, '-f', '-', input=rules)
+    z.pf('-a', ANCHOR, '-f', '-', input=rules)
 
 
 def receive_exact(sock, length):
@@ -32,6 +80,7 @@ def check_case(binary, strategy, options, secure, certificate, key):
     with socket.socket() as listener, tempfile.TemporaryFile() as log:
         listener.bind(('127.0.0.1', 0)); listener.listen(1); listener.settimeout(8)
         endpoint = listener.getsockname()[1]
+        route_endpoint(endpoint)
         with socket.socket() as reserved:
             reserved.bind(('127.0.0.1', 0))
             proxy_port = reserved.getsockname()[1]
@@ -87,7 +136,7 @@ def check_case(binary, strategy, options, secure, certificate, key):
                 client.sendall(b'\x05\x01\x00')
                 if receive_exact(client, 2) != b'\x05\x00':
                     raise RuntimeError('SOCKS authentication failed')
-                client.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01' + struct.pack('!H', endpoint))
+                client.sendall(b'\x05\x01\x00\x01' + socket.inet_aton(TEST4) + struct.pack('!H', endpoint))
                 response = receive_exact(client, 4)
                 if response[:3] != b'\x05\x00\x00' or response[3] not in (1, 4):
                     raise RuntimeError('SOCKS connection failed: ' + repr(response))
@@ -152,7 +201,7 @@ def main(argv=None):
     if sys.platform != 'darwin':
         raise SystemExit('Run the compiled native-engine check on macOS.')
     profiles = json.loads((ROOT / 'strategies.json').read_text(encoding='utf-8'))
-    with tempfile.TemporaryDirectory(prefix='zmac-tcp-transport-') as temp:
+    with local_pf_fixture(), tempfile.TemporaryDirectory(prefix='zmac-tcp-transport-') as temp:
         certificate, key = Path(temp) / 'cert.pem', Path(temp) / 'key.pem'
         subprocess.run(['/usr/bin/openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-sha256',
                         '-nodes', '-days', '1', '-keyout', str(key), '-out', str(certificate),

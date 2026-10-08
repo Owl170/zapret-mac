@@ -22,7 +22,7 @@ jobs:
       - name: Verify HTTP and TLS transport for every strategy under sanitizers
         run: |
           clang -std=gnu99 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wno-address-of-packed-member -Iengine/tpws/epoll-shim/include -Iengine/tpws/macos engine/tpws/*.c engine/tpws/epoll-shim/src/*.c -lz -lpthread -o /tmp/zmac-tpws-sanitized
-          python3 scripts/check_engine_transport.py /tmp/zmac-tpws-sanitized
+          sudo python3 scripts/check_engine_transport.py /tmp/zmac-tpws-sanitized
       - name: Validate actual engine options and PF syntax
         run: sudo python3 scripts/check_native.py engine/tpws/tpws
       - name: Validate PF ABI

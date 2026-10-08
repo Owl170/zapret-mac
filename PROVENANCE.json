@@ -7,7 +7,7 @@
   "macos_build_and_network_tested": false,
   "sha256": {
     ".gitattributes": "446dbe4b9a9103fe6a411cc46e70b18a4d2d9174ad02e117b4b607b8db93695f",
-    ".github/workflows/macos-check.yml": "913204ca61f8e7c687e01e3fcd0a2dd3475db96791968d988a67bb9da562c7a4",
+    ".github/workflows/macos-check.yml": "62e47530955167900e08e3c91c2ee1f7b115e4a5b7a7be626cbd69570c658bd5",
     ".github/workflows/release.yml": "5b1c9bf95a1090911cb0b96d241ffba068f325cbeddce636a8f2ef6fffa6026a",
     ".gitignore": "4f2d4b7f19ffbd8d7874b060bfb15a9d8fe3eee9fc4c44758ab8b1d2fab031bb",
     "AUDIT.md": "eadaa215d7ae53f33cdc26d40f9ea68510781d04df78a810d1578051dfdbe69b",
@@ -83,7 +83,7 @@
     "native/pf_abi_probe.c": "b15fb3a0447ce3407c7cd9734a23f814436a47b524d422a2afe1cc53a8427622",
     "native/protocol_fuzz.c": "6bf1946a8b2227bfc710e69c817814b632678bcaea9ea17222981b86a2b0d29e",
     "payloads/discord-fake.bin": "2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf",
-    "scripts/check_engine_transport.py": "1ff52b83fdcfba282148c0973ed64510da6443f5c458c1df29ec79bcfe498960",
+    "scripts/check_engine_transport.py": "b1abed4b78b28c805eec0a392807b78ea20145646c115894de8379157b963aeb",
     "scripts/check_native.py": "8e2934767cecbf494bd659bd44b7091c471aca5e4add52081a9eae224b7b32c0",
     "scripts/check_pf_udp.py": "687cdb0574bb246f12f6206849577fa7ef16361a46d9957866528aa698f7c028",
     "scripts/package.py": "e160c804292f072f5cdc01295a6699e34769661b151e73e6f808ae09436b3634",
