@@ -3,16 +3,16 @@
   "flowseal_tag": "1.10.3",
   "flowseal_release_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.3",
   "zapret_commit": "c4d0b1990129dce2b28095277173ee0d7702d304",
-  "tested_on": "Windows (193 run, 4 skipped): 189 Python tests passed",
+  "tested_on": "GitHub Actions macOS 14 (193 run, 0 skipped): 193 Python tests passed",
   "macos_build_and_network_tested": false,
   "sha256": {
     ".gitattributes": "446dbe4b9a9103fe6a411cc46e70b18a4d2d9174ad02e117b4b607b8db93695f",
     ".github/workflows/macos-check.yml": "62e47530955167900e08e3c91c2ee1f7b115e4a5b7a7be626cbd69570c658bd5",
     ".github/workflows/release.yml": "5b1c9bf95a1090911cb0b96d241ffba068f325cbeddce636a8f2ef6fffa6026a",
     ".gitignore": "4f2d4b7f19ffbd8d7874b060bfb15a9d8fe3eee9fc4c44758ab8b1d2fab031bb",
-    "AUDIT.md": "eadaa215d7ae53f33cdc26d40f9ea68510781d04df78a810d1578051dfdbe69b",
+    "AUDIT.md": "4c46bd211fa7a86bf9dc3b427ef626f50c8b8a798266d3bbce75352e13f575d7",
     "LICENSE": "1b6b87af686de1f8da4a7233ae4cca7f4f08062ee9e285b47284e9e61746f4e4",
-    "README.md": "86489ddb351e1b040c5603d73cd0efb61e3feeedf52b0c74eb1b4fd9065b05d8",
+    "README.md": "4699067b180d2c76a828143b2035b399eab3ec48dfc51df56a985fb752e9f056",
     "THIRD_PARTY.md": "cc8a201f9873bc1b00278aa5ac999cc046f35cc034ef0d0844f9de823df25dfb",
     "VERSION": "59854984853104df5c353e2f681a15fc7924742f9a2e468c29af248dce45ce03",
     "VOICE.md": "1bc22424a821fdbe1dab674a6bc90f0023365fa0dd71373ed01d57d9bec6f799",
@@ -83,7 +83,7 @@
     "native/pf_abi_probe.c": "b15fb3a0447ce3407c7cd9734a23f814436a47b524d422a2afe1cc53a8427622",
     "native/protocol_fuzz.c": "6bf1946a8b2227bfc710e69c817814b632678bcaea9ea17222981b86a2b0d29e",
     "payloads/discord-fake.bin": "2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf",
-    "scripts/check_engine_transport.py": "b1abed4b78b28c805eec0a392807b78ea20145646c115894de8379157b963aeb",
+    "scripts/check_engine_transport.py": "c4fc52dacda54eb86663c6b9490c67b52c7816f96a126fd32577dafc649e7d4f",
     "scripts/check_native.py": "8e2934767cecbf494bd659bd44b7091c471aca5e4add52081a9eae224b7b32c0",
     "scripts/check_pf_udp.py": "687cdb0574bb246f12f6206849577fa7ef16361a46d9957866528aa698f7c028",
     "scripts/package.py": "e160c804292f072f5cdc01295a6699e34769661b151e73e6f808ae09436b3634",
@@ -116,16 +116,16 @@
   "discord_voice_tested": false,
   "validation": {
     "date": "2026-10-08",
-    "python_tests_passed": 189,
+    "python_tests_passed": 193,
     "live_udp_tests": 4,
     "python_39_syntax_files": 24,
     "bash_syntax_launchers": 4,
-    "native_macos_checks": "Executed on GitHub macOS 14: universal build, engine options, PF syntax/ABI and complete IPv4 UDP PF path passed; IPv6 disabled after failed probe.",
-    "python_tests_platform": "Windows (193 run, 4 skipped)",
+    "native_macos_checks": "Executed on GitHub macOS 14: 193 Python tests, universal build, 10261 parser sanitizer cases, 16 HTTP/TLS sanitizer transport cases, engine listener ownership, engine options, PF syntax/ABI and complete IPv4 UDP PF path passed; IPv6 disabled after failed probe.",
+    "python_tests_platform": "GitHub Actions macOS 14 (193 run, 0 skipped)",
     "macos_ci": {
-      "commit": "b26fa3362bb3b6f58ad2ca264dbcdfd317ebcbe7",
-      "run_url": "https://github.com/Owl170/zapret-mac/actions/runs/37715561029",
-      "python_tests_passed": 161,
+      "commit": "a8e59360ed332d785b2a9e839a94322e144d23fa",
+      "run_url": "https://github.com/Owl170/zapret-mac/actions/runs/37773430316",
+      "python_tests_passed": 193,
       "universal_engine_build": "passed",
       "engine_configurations": 100,
       "pf_syntax_checks": 16,
@@ -134,10 +134,22 @@
       "udp_ipv4_active": true,
       "udp_ipv6_active": false,
       "udp_ipv6_result": "connect_errno_65_no_route_to_host",
-      "real_discord_call_tested": false
+      "real_discord_call_tested": false,
+      "python_tests_run": 193,
+      "python_tests_skipped": 0,
+      "parser_sanitizer_cases": 10261,
+      "parser_sanitizers": "address,undefined",
+      "tcp_transport_cases": 16,
+      "tcp_transport_sanitizers": "address,undefined",
+      "tcp_listener_ownership": "passed"
     },
     "python_tests_run": 193,
-    "python_tests_skipped": 4
+    "python_tests_skipped": 0,
+    "windows_tests": {
+      "run": 193,
+      "passed": 189,
+      "skipped": 4
+    }
   },
   "discord_udp_payload_source": "https://github.com/Flowseal/zapret-discord-youtube/blob/1.10.3/bin/ACTIVE_DISCORD_UDP.bin",
   "udp_transport": "Experimental PF redirect + DIOCNATLOOK + connected BSD UDP sockets. Requires successful local PF probe before ordinary UDP interception.",
@@ -145,5 +157,8 @@
   "macos_engine_options_and_pf_syntax_tested": true,
   "macos_udp_pf_result": "ipv4_passed_ipv6_disabled_after_no_route_on_github_macos14_runner",
   "macos_udp_ipv4_pf_tested": true,
-  "macos_udp_ipv6_pf_tested": false
+  "macos_udp_ipv6_pf_tested": false,
+  "network_validation_scope": "Local HTTP/TLS TCP transport and IPv4 UDP through PF; external DPI bypass and two-way Discord voice are not tested.",
+  "macos_local_tcp_transport_tested": true,
+  "external_dpi_bypass_tested": false
 }

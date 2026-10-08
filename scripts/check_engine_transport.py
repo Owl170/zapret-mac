@@ -112,15 +112,16 @@ def check_case(binary, strategy, options, secure, certificate, key):
                 errors.append(error)
 
         worker = threading.Thread(target=server, daemon=True)
-        worker.start()
         environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0:abort_on_error=1',
                            UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')
         child = None
         failure = None
         try:
             child = subprocess.Popen([str(binary), '--socks', '--no-resolve',
+                                      '--user=root',
                                       '--bind-addr=127.0.0.1', '--port=' + str(proxy_port),
                                       '--maxconn=32', *options], stdout=log, stderr=log, env=environment)
+            worker.start()
             end = time.monotonic() + 8
             while True:
                 if child.poll() is not None:
@@ -188,7 +189,8 @@ def check_case(binary, strategy, options, secure, certificate, key):
                 listener.close()
             except BaseException as error:
                 errors.append(error)
-            worker.join(timeout=9)
+            if worker.ident is not None:
+                worker.join(timeout=9)
         if failure or errors or worker.is_alive() or 'Sanitizer' in diagnostics or 'runtime error:' in diagnostics:
             raise RuntimeError(f'{strategy} {"TLS" if secure else "HTTP"} failed: '
                                f'{failure or errors or "worker/sanitizer failure"}\n{diagnostics}')
