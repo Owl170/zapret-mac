@@ -176,6 +176,36 @@ class RealDatagramTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(len(self.relay.sessions), 0)
 
+    def test_discovered_voice_port_survives_silence_and_inbound_audio(self):
+        discovery = b'\x00\x01\x00\x46' + struct.pack('!I', 123) + bytes(66)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(2)
+            client.sendto(discovery, self.listen)
+            self.assertEqual(client.recvfrom(4096)[0], discovery)
+            peer = self.peers[0]
+            # Scale the production 90-second idle period down in this fixture.
+            time.sleep(self.relay.idle * 3)
+            self.assertEqual(len(self.relay.sessions), 1)
+            self.echo.sendto(b'inbound-after-silence', peer)
+            self.assertEqual(client.recvfrom(4096)[0], b'inbound-after-silence')
+            client.sendto(b'outbound-after-silence', self.listen)
+            self.assertEqual(client.recvfrom(4096)[0], b'outbound-after-silence')
+        self.finish_relay()
+        self.assertEqual(set(self.peers), {peer})
+
+    def test_stun_port_survives_idle_period(self):
+        stun = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + bytes(12)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(2)
+            client.sendto(stun, self.listen)
+            self.assertEqual(client.recvfrom(4096)[0], stun)
+            time.sleep(self.relay.idle * 3)
+            self.assertEqual(len(self.relay.sessions), 1)
+            client.sendto(b'audio', self.listen)
+            self.assertEqual(client.recvfrom(4096)[0], b'audio')
+        self.finish_relay()
+        self.assertEqual(len(set(self.peers)), 1)
+
     def test_reserved_probe_is_local_and_requires_correct_token(self):
         self.relay.resolver = lambda *args: (u.TEST4, u.TEST_PORT)
         self.relay.probe_token = bytes(range(16))

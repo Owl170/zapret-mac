@@ -259,6 +259,9 @@ def show_status(root=z.ROOT):
               mode.get('ipv6_error') or 'нет маршрута IPv6 по умолчанию.')
     print('Пакеты к relay / в сеть / обратно:', status.get('received', 0), '/', status.get('forwarded', 0), '/', status.get('replies', 0))
     print('Discovery / STUN / фейки:', status.get('discoveries', 0), '/', status.get('stun', 0), '/', status.get('fakes', 0))
+    print('UDP-сессии / с сохранением порта:', status.get('sessions', 0), '/', status.get('preserved_sessions', 0))
+    print('Закрытия сессий: простой / лимит / смена сервера:',
+          status.get('idle_closed', 0), '/', status.get('capacity_closed', 0), '/', status.get('endpoint_closed', 0))
     print('Ошибка:', mode.get('error') or status.get('last_error') or '—')
     print('Ответы UDP подтверждают обмен пакетами; звук проверяется реальным звонком.')
 
@@ -274,6 +277,12 @@ def observe(root=z.ROOT, duration=30):
         incoming = state.get('replies', 0) - initial.get('replies', 0)
         print(f'За сеанс: отправлено {outgoing}, ответов {incoming}, '
               f'discovery {state.get("discoveries", 0) - initial.get("discoveries", 0)}', flush=True)
+        for session in state.get('session_details', [])[:4]:
+            age = session['reply_age_seconds']
+            reply = 'ответов пока нет' if age is None else f'последний ответ {age} с назад'
+            print(f'  {session["endpoint"]}, порт {session["local_port"]}: '
+                  f'отправлено {session["sent"]}, ответов {session["replies"]}, '
+                  f'{reply}', flush=True)
     show_status(root)
     report = root / 'logs' / ('voice-' + z.stamp() + '.json')
     z.write_json(report, dict(initial=initial, final=read_status(root),

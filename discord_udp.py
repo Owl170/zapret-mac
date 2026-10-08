@@ -174,7 +174,10 @@ class Relay:
                           received=0, forwarded=0, replies=0, fakes=0,
                           discoveries=0, stun=0, lookup_errors=0, socket_errors=0,
                           sessions=0, probes4=0, probes6=0, last_error='',
-                          last_endpoint='', last_packet='', last_reply_at=0)
+                          last_endpoint='', last_packet='', last_reply_at=0,
+                          last_forward_at=0, session_created=0, session_closed=0,
+                          idle_closed=0, capacity_closed=0, endpoint_closed=0,
+                          last_session_close={})
 
     def listen(self, address, family=socket.AF_INET):
         listener = socket.socket(family, socket.SOCK_DGRAM)
@@ -194,13 +197,33 @@ class Relay:
         now = time.monotonic()
         if self.status_path and (force or now - self.last_snapshot >= 1):
             self.stats['sessions'] = len(self.sessions)
+            self.stats['preserved_sessions'] = sum(bool(s.get('preserve_port')) for s in self.sessions.values())
+            # Bounded metadata only: never retain packet contents or audio.
+            recent = sorted(self.sessions.values(), key=lambda s: s['last'], reverse=True)[:16]
+            self.stats['session_details'] = [dict(
+                endpoint=f'{s["destination"][0]}:{s["destination"][1]}',
+                local_port=s['socket'].getsockname()[1],
+                preserve_port=s.get('preserve_port', False),
+                sent=s.get('sent', 0), replies=s.get('replies', 0),
+                idle_seconds=round(max(0, now - s['last']), 1),
+                reply_age_seconds=(round(max(0, now - s['last_reply']), 1)
+                                   if s.get('last_reply') is not None else None)
+            ) for s in recent]
             self.stats['updated_at'] = time.time()
             write_json(self.status_path, self.stats)
             self.last_snapshot = now
 
-    def close_session(self, key):
+    def close_session(self, key, reason='cleanup'):
         session = self.sessions.pop(key, None)
         if session:
+            self.stats['session_closed'] += 1
+            counter = reason + '_closed'
+            if counter in self.stats:
+                self.stats[counter] += 1
+            self.stats['last_session_close'] = dict(
+                reason=reason, at=time.time(),
+                endpoint=f'{session["destination"][0]}:{session["destination"][1]}',
+                preserve_port=session.get('preserve_port', False))
             try:
                 self.selector.unregister(session['socket'])
             except (KeyError, ValueError):
@@ -246,27 +269,36 @@ class Relay:
         if destination[0] == listener.getsockname()[0] and destination[1] == listener.getsockname()[1]:
             raise Error('PF вернул адрес самого relay; возможна рекурсия.')
         # Looking up each packet detects endpoint changes instead of silently reusing a stale mapping.
+        kind = classify(data)
         key = (listener.fileno(), client)
         session = self.sessions.get(key)
         if session and session['destination'] != destination:
-            self.close_session(key)
+            self.close_session(key, 'endpoint')
             session = None
         if not session:
             if len(self.sessions) >= self.max_sessions:
-                self.close_session(min(self.sessions, key=lambda k: self.sessions[k]['last']))
+                ordinary = [k for k, s in self.sessions.items() if not s.get('preserve_port')]
+                victim = min(ordinary or self.sessions, key=lambda k: self.sessions[k]['last'])
+                self.close_session(victim, 'capacity')
             upstream = socket.socket(listener.family, socket.SOCK_DGRAM)
             try:
                 upstream.connect(destination)
                 upstream.setblocking(False)
                 session = dict(socket=upstream, listener=listener, client=client,
                                destination=destination, last=time.monotonic(),
-                               injections=0, last_injection=0)
+                               injections=0, last_injection=0, preserve_port=False,
+                               sent=0, replies=0, last_reply=None)
                 self.selector.register(upstream, selectors.EVENT_READ, ('upstream', key))
                 self.sessions[key] = session
+                self.stats['session_created'] += 1
             except Exception:
                 upstream.close()
                 raise
-        kind = classify(data)
+        # Discovery/STUN advertises this socket's external port to the peer.
+        # Reopening it after silence changes that port without renegotiation.
+        # Keep it until endpoint change, explicit shutdown or capacity pressure.
+        if kind != 'other':
+            session['preserve_port'] = True
         now = time.monotonic()
         inject = kind != 'other' and session['injections'] < 2 and now - session['last_injection'] >= 1
         self.stats['last_packet'] = kind
@@ -285,6 +317,8 @@ class Relay:
 
         transmit(session['socket'], data, self.payload, self.profile, inject, on_fake=record_fake)
         self.stats['forwarded'] += 1
+        self.stats['last_forward_at'] = time.time()
+        session['sent'] += 1
         session['last'] = now
 
     def receive_upstream(self, key):
@@ -293,6 +327,8 @@ class Relay:
             return
         try:
             data = session['socket'].recv(65535)
+        except BlockingIOError:
+            raise
         except OSError as error:
             # A pending ICMP after a low-TTL fake is not a closed UDP connection.
             self.stats['socket_errors'] += 1
@@ -300,6 +336,8 @@ class Relay:
             return
         session['listener'].sendto(data, session['client'])
         session['last'] = time.monotonic()
+        session['last_reply'] = session['last']
+        session['replies'] += 1
         self.stats['replies'] += 1
         self.stats['last_reply_at'] = time.time()
 
@@ -318,8 +356,9 @@ class Relay:
                 self.stats['last_error'] = str(error)
         now = time.monotonic()
         for key in list(self.sessions):
-            if now - self.sessions[key]['last'] > self.idle:
-                self.close_session(key)
+            session = self.sessions[key]
+            if not session.get('preserve_port') and now - session['last'] > self.idle:
+                self.close_session(key, 'idle')
         self.snapshot()
 
     def serve(self):
