@@ -1,6 +1,7 @@
 """Regression checks for failed cleanup and privileged installation writes."""
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -267,6 +268,117 @@ class ControllerAuditTests(unittest.TestCase):
         command = f'0 {older} -u {self.root / "discord_udp.py"} serve --root {self.root}\n'
         with patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=command)):
             self.assertTrue(z.matches_stale_child(555, 'udp', self.root))
+
+    def test_deleted_old_python_interpreter_still_identifies_recorded_udp_child(self):
+        older = self.base / 'python3.9'
+        older.write_bytes(b'old interpreter')
+        older.unlink()
+        command = f'0 {older} -u {self.root / "discord_udp.py"} serve --root {self.root}\n'
+        with patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=command)):
+            self.assertTrue(z.matches_stale_child(555, 'udp', self.root))
+
+    def test_supervisor_identity_requires_exact_root_uid_script_and_arguments(self):
+        valid = f'{sys.executable} -u {self.root / "zapret.py"} supervise'
+        for output, expected in [(f'0 {valid}\n', True), (f'501 {valid}\n', False),
+                                 (f'0 unrelated-process --saved-command={valid}\n', False),
+                                 (f'0 {valid}-other\n', False),
+                                 (f'0 {sys.executable} -u {self.root / "zapret.py"} status --supervise\n', False)]:
+            with self.subTest(output=output), patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=output)):
+                self.assertEqual(z.matches_stale_child(555, 'supervisor', self.root), expected)
+
+    def test_posix_shell_prefix_cannot_spoof_saved_python_child_identity(self):
+        suffixes = {'udp': f' -u {self.root / "discord_udp.py"} serve --root {self.root}',
+                    'supervisor': f' -u {self.root / "zapret.py"} supervise'}
+        prefixes = ['/bin/sh -c /usr/bin/python3', '/bin/sh -- /usr/bin/python3',
+                    '/bin/echo /usr/bin/python3', '/usr/bin/python3 -E /usr/bin/python3']
+        # Explicit POSIX semantics make this regression meaningful on Windows.
+        for kind, suffix in suffixes.items():
+            for prefix in prefixes:
+                command = f'0 {prefix}{suffix}\n'
+                with self.subTest(kind=kind, prefix=prefix), patch.object(z, 'Path', PurePosixPath), patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=command)):
+                    self.assertFalse(z.matches_stale_child(555, kind, self.root))
+
+    def test_deleted_posix_python_path_with_spaces_still_matches_exact_script(self):
+        prefix = '/Applications/Old Python Tools/python3.9'
+        for kind, suffix in [('udp', f' -u {self.root / "discord_udp.py"} serve --root {self.root}'),
+                             ('supervisor', f' -u {self.root / "zapret.py"} supervise')]:
+            command = f'0 {prefix}{suffix}\n'
+            with self.subTest(kind=kind), patch.object(z, 'Path', PurePosixPath), patch.object(z, 'run', return_value=SimpleNamespace(returncode=0, stdout=command)):
+                self.assertTrue(z.matches_stale_child(555, kind, self.root))
+
+    def test_bad_udp_metadata_does_not_block_verified_engine_recovery(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        for status in ('{', '[]', 'null', '42'):
+            with self.subTest(status=status):
+                (self.root / 'runtime/udp-status.json').write_text(status, encoding='utf-8')
+                alive = True
+
+                def ps(args, **kwargs):
+                    self.assertEqual(int(args[args.index('-p') + 1]), 444)
+                    return SimpleNamespace(returncode=0 if alive else 1,
+                                           stdout=f'0 {self.root / "bin/tpws"} --port=988\n' if alive else '')
+
+                def terminate(pid, sig):
+                    nonlocal alive
+                    alive = False
+
+                with patch.object(z, 'is_running', return_value=False), patch.object(z, 'run', side_effect=ps), patch.object(z.os, 'kill', side_effect=terminate) as kill:
+                    with self.assertRaisesRegex(z.Error, 'udp-status.json'):
+                        z.recover_stale_children(self.root)
+                kill.assert_called_once_with(444, z.signal.SIGTERM)
+
+    def test_udp_metadata_disappearing_during_read_does_not_fail_recovery(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        status_path = self.root / 'runtime/udp-status.json'
+        z.write_json(status_path, {'pid': 555})
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == status_path:
+                raise FileNotFoundError('UDP status removed concurrently')
+            return original_read(path, *args, **kwargs)
+
+        with patch.object(z, 'is_running', return_value=False), patch.object(Path, 'read_text', read), patch.object(z, 'matches_stale_child', side_effect=[True, False]), patch.object(z.os, 'kill') as kill:
+            z.recover_stale_children(self.root)
+        kill.assert_called_once_with(444, z.signal.SIGTERM)
+
+    def test_failed_engine_termination_does_not_skip_verified_udp_recovery(self):
+        z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})
+        z.write_json(self.root / 'runtime/udp-status.json', {'pid': 555})
+        udp_alive = True
+
+        def matches(pid, kind, root):
+            return pid == 444 or udp_alive
+
+        def terminate(pid, sig):
+            nonlocal udp_alive
+            if pid == 444:
+                raise PermissionError('engine termination denied')
+            udp_alive = False
+
+        with patch.object(z, 'is_running', return_value=False), patch.object(z, 'matches_stale_child', side_effect=matches), patch.object(z.os, 'kill', side_effect=terminate) as kill:
+            with self.assertRaisesRegex(PermissionError, 'denied'):
+                z.recover_stale_children(self.root)
+        self.assertEqual([call.args for call in kill.call_args_list], [(444, z.signal.SIGTERM), (555, z.signal.SIGTERM)])
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX directory permissions are unavailable on Windows')
+    def test_fresh_install_under_permissive_umask_protects_directories_before_writes(self):
+        root = self.base / 'fresh-install'
+        folders = ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads')
+        original_write = z.atomic_write
+
+        def protected_write(path, content, mode=0o644):
+            if root in Path(path).parents:
+                for directory in [root, *(root / folder for folder in folders)]:
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o755, str(directory))
+            return original_write(path, content, mode)
+
+        previous_umask = os.umask(0)
+        try:
+            with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=SimpleNamespace(pw_uid=501)), patch.object(z, 'run'), patch.object(z, 'atomic_write', side_effect=protected_write):
+                z.install(z.SOURCE / 'zapret.py', root=root)
+        finally:
+            os.umask(previous_umask)
 
     def test_new_live_supervisor_prevents_signal_after_recovery_initial_check(self):
         z.write_json(self.root / 'runtime/state.json', {'pid': 333, 'engine_pid': 444})

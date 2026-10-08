@@ -133,7 +133,7 @@ class Backend:
                     try:
                         z.run(command + ['--address', TEST6], timeout=5)
                         ipv6_probe = 'passed'
-                    except (z.Error, subprocess.TimeoutExpired) as error:
+                    except (z.Error, OSError, subprocess.TimeoutExpired) as error:
                         ipv6_probe = 'failed'
                         ipv6_error = str(error)
                 else:

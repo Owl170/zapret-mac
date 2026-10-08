@@ -254,6 +254,16 @@ class BackendFailureTests(unittest.TestCase):
         self.assertFalse(mode['ipv6_active'])
         self.assertNotIn('inet6', applied[-1])
 
+    def test_ipv6_probe_launch_failure_keeps_only_verified_ipv4(self):
+        started, mode, applied, probes = self.start_with_family_probes(
+            ipv6_failure=OSError(errno.EAGAIN, 'fork temporarily unavailable'))
+        self.assertTrue(started)
+        self.assertTrue(mode['ipv4_active'])
+        self.assertEqual(mode['ipv6_probe'], 'failed')
+        self.assertFalse(mode['ipv6_active'])
+        self.assertIn('fork temporarily unavailable', mode['ipv6_error'])
+        self.assertNotIn('inet6', applied[-1])
+
     def test_relay_crash_during_ipv6_probe_still_disables_every_family(self):
         started, mode, applied, probes = self.start_with_family_probes(
             ipv6_failure=z.Error('IPv6 probe failed'), child_crashes=True)

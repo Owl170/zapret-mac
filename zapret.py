@@ -351,10 +351,9 @@ def get_state(root=ROOT):
 def is_running(root=ROOT):
     state = get_state(root)
     pid = state.get('pid')
-    if not isinstance(pid, int) or pid < 2:
+    if type(pid) is not int or pid < 2:
         return False
-    result = run(['/bin/ps', '-p', str(pid), '-o', 'command='], check=False)
-    return result.returncode == 0 and str(root / 'zapret.py') in result.stdout and 'supervise' in result.stdout
+    return matches_stale_child(pid, 'supervisor', root)
 
 
 def matches_stale_child(pid, kind, root=ROOT):
@@ -370,15 +369,25 @@ def matches_stale_child(pid, kind, root=ROOT):
     if kind == 'engine':
         executable = str(root / 'bin' / 'tpws')
         return command == executable or command.startswith(executable + ' ')
-    suffix = f' -u {root / "discord_udp.py"} serve --root {root}'
-    if kind != 'udp' or not command.endswith(suffix):
+    if kind == 'udp':
+        suffix = f' -u {root / "discord_udp.py"} serve --root {root}'
+    elif kind == 'supervisor':
+        suffix = f' -u {root / "zapret.py"} supervise'
+    else:
+        return False
+    if not command.endswith(suffix):
         return False
     interpreter = command[:-len(suffix)]
     # An interpreter upgrade must not hide an orphan launched by the old Python.
+    if interpreter == sys.executable:
+        return True
+    # ps flattens argv, so an absolute Python-looking tail can actually belong
+    # to a shell command. Reject option/additional executable boundaries while
+    # preserving ordinary directory names such as "Python Tools".
+    if re.search(r'\s(?:-\S|[/\\]|[A-Za-z]:[/\\])', interpreter):
+        return False
     executable = Path(interpreter)
-    return (interpreter == sys.executable or
-            (executable.is_absolute() and re.fullmatch(r'[Pp]ython(?:3(?:\.\d+)*)?', executable.name)
-             and executable.is_file()))
+    return bool(executable.is_absolute() and re.fullmatch(r'[Pp]ython(?:3(?:\.\d+)*)?', executable.name))
 
 
 def recover_stale_children(root=ROOT):
@@ -386,12 +395,6 @@ def recover_stale_children(root=ROOT):
     if is_running(root):
         return
     state = get_state(root)
-    status_path = root / 'runtime' / 'udp-status.json'
-    status = json.loads(status_path.read_text(encoding='utf-8')) if status_path.exists() else {}
-    if not isinstance(status, dict):
-        raise Error('Некорректный runtime/udp-status.json: PID relay не подтверждён.')
-    candidates = [(state.get('engine_pid'), 'engine'), (status.get('pid'), 'udp')]
-
     def terminate(pid, kind):
         if type(pid) is not int or pid < 2 or pid in (os.getpid(), state.get('pid')):
             return
@@ -423,7 +426,20 @@ def recover_stale_children(root=ROOT):
         if not wait_stopped():
             raise Error(f'Не удалось завершить оставшийся процесс {kind}, PID {pid}.')
 
-    cleanup_steps(*(lambda pid=pid, kind=kind: terminate(pid, kind) for pid, kind in candidates))
+    def recover_udp():
+        status_path = root / 'runtime' / 'udp-status.json'
+        try:
+            status = json.loads(status_path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return
+        except ValueError:
+            raise Error('Некорректный runtime/udp-status.json: PID relay не подтверждён.') from None
+        if not isinstance(status, dict):
+            raise Error('Некорректный runtime/udp-status.json: PID relay не подтверждён.')
+        terminate(status.get('pid'), 'udp')
+
+    # Corrupt UDP telemetry cannot prevent recovery of a verified engine PID.
+    cleanup_steps(lambda: terminate(state.get('engine_pid'), 'engine'), recover_udp)
 
 
 def wait_ready(child, timeout=15):
@@ -530,18 +546,68 @@ def launch_loaded():
 
 def stop(root=ROOT):
     require_mac(True)
+    # Freeze the PID before any operation that can make the state disappear or
+    # replace it. A later state file must never select a different signal target.
+    saved_pid = get_state(root).get('pid')
+
+    def check_replacement():
+        current_pid = get_state(root).get('pid')
+        if current_pid not in (None, saved_pid):
+            raise Error('Состояние сервиса изменилось: появился другой supervisor. Повторите остановку.')
+
     if launch_loaded():
+        check_replacement()
         run(['/bin/launchctl', 'bootout', 'system/' + LABEL])
     if is_running(root):
-        os.kill(get_state(root)['pid'], signal.SIGTERM)
+        check_replacement()
+        if matches_stale_child(saved_pid, 'supervisor', root):
+            check_replacement()
+            try:
+                os.kill(saved_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for _ in range(100):
-            if not is_running(root):
+            check_replacement()
+            if not matches_stale_child(saved_pid, 'supervisor', root):
                 break
             time.sleep(0.1)
-        if is_running(root):
+        if matches_stale_child(saved_pid, 'supervisor', root):
             raise Error('Supervisor не завершился. Проверьте logs/service.log.')
-    cleanup_steps(lambda: release_pf(root), lambda: recover_stale_children(root))
-    root.joinpath('runtime', 'state.json').unlink(missing_ok=True)
+
+    # The supervisor takes this same lock before startup. Holding it after the
+    # previous process exits prevents a new service from acquiring PF while we
+    # release the old rules, recover children, and remove old metadata.
+    service_lock = None
+    try:
+        if sys.platform == 'darwin' and (root / 'runtime').is_dir():
+            import fcntl
+            service_lock = (root / 'runtime' / 'service.lock').open('a')
+            lock_deadline = None
+            while True:
+                try:
+                    fcntl.flock(service_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    # Normal shutdown removes state just before closing the
+                    # lock. Allow that short gap, while preserving new owners.
+                    check_replacement()
+                    now = time.monotonic()
+                    if lock_deadline is None:
+                        lock_deadline = now + 2
+                    elif now >= lock_deadline:
+                        raise Error('Supervisor запускается или завершает работу. Повторите остановку.') from None
+                    time.sleep(0.05)
+        check_replacement()
+        if is_running(root):
+            raise Error('Supervisor ещё работает; его правила и состояние сохранены.')
+        cleanup_steps(lambda: release_pf(root), lambda: recover_stale_children(root))
+        check_replacement()
+        if is_running(root):
+            raise Error('Появился новый supervisor; его состояние сохранено.')
+        root.joinpath('runtime', 'state.json').unlink(missing_ok=True)
+    finally:
+        if service_lock is not None:
+            service_lock.close()
 
 
 def start(root=ROOT):
@@ -614,14 +680,25 @@ def update_lists(root=ROOT):
     backup.mkdir(parents=True)
     for name in pending:
         shutil.copy2(root / 'lists' / name, backup / name)
-    written = []
+    attempted = []
     try:
         for name, text in pending.items():
+            # An interrupt can arrive after os.replace committed the new file
+            # but before atomic_write returns. Include that file in the rollback.
+            attempted.append(name)
             atomic_write(root / 'lists' / name, text)
-            written.append(name)
-    except Exception:
-        for name in written:
-            shutil.copy2(backup / name, root / 'lists' / name)
+    except BaseException:
+        rollback_errors = []
+        for name in attempted:
+            try:
+                saved = backup / name
+                atomic_write(root / 'lists' / name, saved.read_bytes(), saved.stat().st_mode & 0o777)
+            except BaseException as error:
+                rollback_errors.append((name, error))
+        for name, error in rollback_errors:
+            detail = str(error) or type(error).__name__
+            print(f'Ошибка отката списка {name}: {detail}. '
+                  f'Резервная копия: {backup / name}', file=sys.stderr)
         raise
     print('Списки обновлены. Пользовательские файлы сохранены. Резервная копия:', backup)
     if is_running(root):
@@ -720,7 +797,13 @@ def clean_discord_cache(root=ROOT):
         for folder in ('Cache', 'Code Cache', 'GPUCache'):
             path = app / folder
             if path.is_dir() and not path.is_symlink():
-                path.rename(app / (folder + '.zapret-backup-' + stamp()))
+                # Every ancestor belongs to the user and may change after the
+                # check. Perform the rename with that user's permissions.
+                destination = app / (folder + '.zapret-backup-' + stamp())
+                run(['/usr/bin/sudo', '-u', '#' + str(user.pw_uid), '--',
+                     sys.executable, '-c',
+                     'import os,sys; os.rename(sys.argv[1], sys.argv[2])',
+                     path, destination])
                 moved += 1
     print(f'Перемещено папок кеша: {moved}. Копии сохранены рядом с исходными папками.')
 
@@ -914,8 +997,12 @@ def install(binary, source=SOURCE, root=ROOT):
     if root.exists():
         stop(root)
     try:
+        root.mkdir(mode=0o755, exist_ok=True)
+        root.chmod(0o755)
         for folder in folders:
-            (root / folder).mkdir(parents=True, exist_ok=True)
+            directory = root / folder
+            directory.mkdir(mode=0o755, exist_ok=True)
+            directory.chmod(0o755)
         for dst, (content, mode) in contents.items():
             atomic_write(dst, content, mode)
         write_json(root / 'installation.json', dict(user_uid=user.pw_uid))
