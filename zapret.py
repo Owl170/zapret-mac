@@ -901,11 +901,13 @@ def curl_test(target):
     try:
         result = run(args, check=False, timeout=16)
     except subprocess.TimeoutExpired:
-        return dict(name=name, url=url, tls_reached=False, http='000', seconds='16', error='Таймаут проверки')
+        return dict(name=name, url=url, tls_reached=False, transfer_complete=False,
+                    http='000', seconds='16', error='Таймаут проверки')
     parts = result.stdout.strip().split()
     code = parts[0] if parts else '000'
     elapsed = parts[1] if len(parts) > 1 else '?'
-    return dict(name=name, url=url, tls_reached=result.returncode == 0 and bool(re.fullmatch('[1-5][0-9]{2}', code)),
+    reached = bool(re.fullmatch('[1-5][0-9]{2}', code))
+    return dict(name=name, url=url, tls_reached=reached, transfer_complete=reached and result.returncode == 0,
                 http=code, seconds=elapsed, error=result.stderr.strip())
 
 
@@ -918,15 +920,51 @@ def targets(root=ROOT):
     return rows
 
 
+def discord_tests():
+    from discord_probe import CHECKS
+    args = [sys.executable, str(Path(__file__).with_name('discord_probe.py'))]
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        args = ['/usr/bin/sudo', '-u', '#' + str(original_user().pw_uid), '--'] + args
+    try:
+        result = run(args, check=False, timeout=60)
+        if result.returncode:
+            raise Error('Проверки приложения завершились с ошибкой: ' + result.stderr.strip()[:300])
+        rows = json.loads(result.stdout)
+        if (not isinstance(rows, list) or len(rows) != len(CHECKS)
+                or {r.get('name') for r in rows if isinstance(r, dict)} != set(CHECKS)
+                or any(not isinstance(r, dict)
+                       or any(not isinstance(r.get(k), str) for k in ('name', 'url', 'http', 'seconds', 'error'))
+                       or type(r.get('application_ok')) is not bool or type(r.get('tls_reached')) is not bool
+                       for r in rows)):
+            raise Error('Некорректный отчёт проверок приложения')
+        return rows
+    except (Error, OSError, ValueError, subprocess.TimeoutExpired) as error:
+        return [dict(name=name, url='', http='---', seconds='?', tls_reached=False,
+                     application_ok=False, error=str(error)) for name in CHECKS]
+
+
 def network_tests(root=ROOT, quiet=False):
     require_mac()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+    if not quiet:
+        print('Проверяем адреса и этапы загрузки Discord…', flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=7) as pool:
+        app = pool.submit(discord_tests)
         rows = list(pool.map(curl_test, targets(root)))
+        rows += app.result()
     if not quiet:
         for row in rows:
+            if 'application_ok' in row:
+                detail = 'Проверка пройдена' if row['application_ok'] else row['error']
+            elif row['tls_reached']:
+                detail = 'TLS получен'
+                if row.get('transfer_complete') is False:
+                    detail += '; загрузка не завершена: ' + row['error']
+            else:
+                detail = row['error']
             print(f'{row["name"]:24} HTTP {row["http"]:3}  {row["seconds"]} s  '
-                  + ('TLS получен' if row['tls_reached'] else row['error']))
-        print('Это TCP/TLS-проверка. Голос Discord, QUIC и воспроизведение видео не проверяются.')
+                  + detail)
+        print('Проверены TLS, страница, один JavaScript, публичный API и WebSocket Hello Discord. '
+              'Вход в аккаунт, голос и воспроизведение видео не проверяются.')
     return rows
 
 
@@ -1005,7 +1043,7 @@ def status(root=ROOT):
     cfg = config(root)
     active = is_running(root)
     print('Версия:', version(root))
-    print('Обход:', 'РАБОТАЕТ' if active and get_state(root).get('phase') == 'running' else 'ОСТАНОВЛЕН / ЗАПУСКАЕТСЯ')
+    print('Сервис:', 'ЗАПУЩЕН' if active and get_state(root).get('phase') == 'running' else 'ОСТАНОВЛЕН / ЗАПУСКАЕТСЯ')
     print('Активная стратегия:', get_state(root).get('strategy', '—'))
     print('Выбранная стратегия:', cfg['strategy'])
     print('Автозапуск:', PLIST.exists())
@@ -1016,7 +1054,7 @@ def install(binary, source=SOURCE, root=ROOT):
     require_mac(True)
     folders = ('bin', 'lists', 'runtime', 'logs', 'backups', 'licenses', 'payloads')
     copies = [(source / name, root / name, 0o644)
-              for name in ('zapret.py', 'discord_udp.py', 'voice_controller.py', 'discord_cache.py',
+              for name in ('zapret.py', 'discord_udp.py', 'discord_probe.py', 'voice_controller.py', 'discord_cache.py',
                            'strategy_picker.py', 'strategies.json', 'VERSION', 'targets.txt')]
     copies += [(Path(binary), root / 'bin' / 'tpws', 0o755),
                (source / 'payloads' / 'discord-fake.bin', root / 'payloads' / 'discord-fake.bin', 0o644)]
@@ -1124,7 +1162,8 @@ def uninstall(root=ROOT):
     PLIST.unlink(missing_ok=True)
     manage_hosts(False, root)
     for path in (root / 'bin' / 'tpws', root / 'zapret.py', root / 'discord_udp.py', root / 'voice_controller.py',
-                 root / 'discord_cache.py', root / 'strategy_picker.py', root / 'strategies.json', root / 'targets.txt', root / 'VERSION'):
+                 root / 'discord_cache.py', root / 'discord_probe.py', root / 'strategy_picker.py',
+                 root / 'strategies.json', root / 'targets.txt', root / 'VERSION'):
         path.unlink(missing_ok=True)
     print('Движок и автозапуск удалены. Настройки, списки и резервные копии сохранены в:', root)
 
@@ -1147,12 +1186,14 @@ def choose_strategy(root=ROOT):
 
 def connect(root=ROOT):
     from strategy_picker import select
+    from discord_probe import SCHEMA
     cfg = config(root)
     try:
         saved = json.loads((root / 'runtime/strategy-selection.json').read_text())
     except (FileNotFoundError, ValueError):
         saved = {}
-    if isinstance(saved, dict) and saved.get('accepted') is True and saved.get('selected') == cfg['strategy']:
+    if (isinstance(saved, dict) and saved.get('schema') == SCHEMA
+            and saved.get('accepted') is True and saved.get('selected') == cfg['strategy']):
         with control_lock(root):
             restart(root)
     else:

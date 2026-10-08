@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import strategy_picker as picker
+from discord_probe import CHECKS, SCHEMA
 import zapret as z
 
 
@@ -25,9 +26,12 @@ class AutoStrategyTests(unittest.TestCase):
         self.calls = {}
 
     def rows(self, good=(), youtube=False):
-        return [dict(name=name, url=url, tls_reached=name in good or
+        rows = [dict(name=name, url=url, tls_reached=name in good or
                      (youtube and name.startswith('YouTube')) or name.startswith('Google'),
                      http='200', seconds='0.1', error='') for name, url in z.targets(self.root)]
+        ok = set(picker.REQUIRED).issubset(good)
+        return rows + [dict(name=name, url='https://example.invalid', tls_reached=ok,
+                            application_ok=ok, http='200', seconds='0.1', error='') for name in CHECKS]
 
     def run_picker(self, probe):
         with patch.object(z, 'require_mac'), patch.object(z, 'is_running', return_value=True), \
@@ -42,6 +46,7 @@ class AutoStrategyTests(unittest.TestCase):
         self.assertEqual(z.config(self.root), dict(self.saved, strategy='tlsrec'))
         accepted = json.loads((self.root / 'runtime/strategy-selection.json').read_text())
         self.assertTrue(accepted['accepted'])
+        self.assertEqual(accepted['schema'], SCHEMA)
         self.assertEqual(len(accepted['confirmation']), 1)
 
     def test_failed_confirmation_tries_next_complete_candidate(self):
@@ -90,6 +95,31 @@ class AutoStrategyTests(unittest.TestCase):
             with self.assertRaises(z.Error):
                 picker.select(self.root)
         stop.assert_not_called()
+
+    def test_tls_success_with_broken_websocket_cannot_win(self):
+        def probe(*args, **kwargs):
+            name = z.config(self.root)['strategy']
+            rows = self.rows(picker.REQUIRED, youtube=True)
+            if name != 'tlsrec-disorder':
+                rows[-1]['application_ok'] = False
+            return rows
+        self.assertTrue(self.run_picker(probe))
+        self.assertEqual(z.config(self.root)['strategy'], 'tlsrec-disorder')
+
+    def test_legacy_confirmation_is_retested(self):
+        z.write_json(self.root / 'runtime/strategy-selection.json', dict(accepted=True, selected=self.saved['strategy']))
+        with patch.object(picker, 'select') as select, patch.object(z, 'restart') as restart:
+            z.connect(self.root)
+        select.assert_called_once_with(self.root)
+        restart.assert_not_called()
+
+    def test_partial_http_200_is_tls_success_but_incomplete_download(self):
+        from types import SimpleNamespace
+        result = SimpleNamespace(returncode=28, stdout='200 12.003', stderr='Operation timed out with 17894 bytes received')
+        with patch.object(z, 'run', return_value=result):
+            row = z.curl_test(('DiscordMain', 'https://discord.com'))
+        self.assertTrue(row['tls_reached'])
+        self.assertFalse(row['transfer_complete'])
 
     def test_curl_timeout_is_a_failed_target_not_a_failed_batch(self):
         with patch.object(z, 'run', side_effect=subprocess.TimeoutExpired('curl', 16)):
