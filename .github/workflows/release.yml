@@ -63,6 +63,8 @@ jobs:
           RESUME_VERSION: ${{ steps.current.outputs.resume_version }}
           NEXT_VERSION: ${{ steps.calculate.outputs.new_version }}
           TESTS_PASSED: ${{ steps.tests.outputs.passed }}
+          TESTS_RUN: ${{ steps.tests.outputs.run }}
+          TESTS_SKIPPED: ${{ steps.tests.outputs.skipped }}
         shell: bash
         run: |
           if [[ -n "$EXISTING_TAG" ]]; then
@@ -79,7 +81,7 @@ jobs:
               echo 'publish=false' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            python3 scripts/update_version.py "$version" --tests-passed "$TESTS_PASSED" --platform 'GitHub Actions Ubuntu'
+            python3 scripts/update_version.py "$version" --tests-passed "$TESTS_PASSED" --tests-run "$TESTS_RUN" --tests-skipped "$TESTS_SKIPPED" --platform 'GitHub Actions Ubuntu'
             commit=true
           fi
           echo "number=$version" >> "$GITHUB_OUTPUT"
