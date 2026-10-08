@@ -10,7 +10,7 @@
     ".github/workflows/macos-check.yml": "cc7f2028dc1fd9a7d73468d51bf0fd7ca5a2fc0662e6e63cf9e70b93751fe772",
     ".github/workflows/release.yml": "5b1c9bf95a1090911cb0b96d241ffba068f325cbeddce636a8f2ef6fffa6026a",
     ".gitignore": "4f2d4b7f19ffbd8d7874b060bfb15a9d8fe3eee9fc4c44758ab8b1d2fab031bb",
-    "AUDIT.md": "4c46bd211fa7a86bf9dc3b427ef626f50c8b8a798266d3bbce75352e13f575d7",
+    "AUDIT.md": "c1b1dcec31c25d02eb4cfea085a704789788d4842c7d11dd43f2bd07e3f11c03",
     "LICENSE": "1b6b87af686de1f8da4a7233ae4cca7f4f08062ee9e285b47284e9e61746f4e4",
     "README.md": "4699067b180d2c76a828143b2035b399eab3ec48dfc51df56a985fb752e9f056",
     "THIRD_PARTY.md": "ef1177d47d497848ffe38553d070737b66c27bc99862676f541f1624a0624fea",
@@ -85,7 +85,7 @@
     "native/protocol_fuzz.c": "6bf1946a8b2227bfc710e69c817814b632678bcaea9ea17222981b86a2b0d29e",
     "payloads/discord-fake.bin": "2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf",
     "scripts/check_engine_transport.py": "f69a7c565d593d97a6c8c9fb5816a19044c380b4fa48f3acf29e03bf59950cee",
-    "scripts/check_native.py": "8e2934767cecbf494bd659bd44b7091c471aca5e4add52081a9eae224b7b32c0",
+    "scripts/check_native.py": "f40b5f3075ae75693692619d4c588aa519c10b5eac8e54105aab305af927f2bc",
     "scripts/check_pf_udp.py": "687cdb0574bb246f12f6206849577fa7ef16361a46d9957866528aa698f7c028",
     "scripts/package.py": "e160c804292f072f5cdc01295a6699e34769661b151e73e6f808ae09436b3634",
     "scripts/release_state.py": "53d93da080ef4a9cd80af436f29260dd54bc9304aef6cddea6bdf6374a4e9bb8",
@@ -161,5 +161,11 @@
   "macos_udp_ipv6_pf_tested": false,
   "network_validation_scope": "Local HTTP/TLS TCP transport and IPv4 UDP through PF; external DPI bypass and two-way Discord voice are not tested.",
   "macos_local_tcp_transport_tested": true,
-  "external_dpi_bypass_tested": false
+  "external_dpi_bypass_tested": false,
+  "engine_local_patches": [
+    {
+      "file": "engine/tpws/helpers.c",
+      "reason": "Copy sockaddr_in46 members without a sockaddr_storage alignment assumption; covered by native/address_copy_check.c and transparent PF transport under ASan/UBSan."
+    }
+  ]
 }
