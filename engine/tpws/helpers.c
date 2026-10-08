@@ -316,7 +316,19 @@ void sacopy(struct sockaddr_storage *sa_dest, const struct sockaddr *sa)
 }
 void sa46copy(sockaddr_in46 *sa_dest, const struct sockaddr *sa)
 {
-	sacopy((struct sockaddr_storage*)sa_dest, sa);
+	// sockaddr_in46 may be less aligned than sockaddr_storage on Darwin.
+	// Copy into the actual union members instead of casting to the larger type.
+	switch (sa->sa_family)
+	{
+	case AF_INET:
+		memcpy(&sa_dest->sa4, sa, sizeof(sa_dest->sa4));
+		break;
+	case AF_INET6:
+		memcpy(&sa_dest->sa6, sa, sizeof(sa_dest->sa6));
+		break;
+	default:
+		memset(sa_dest, 0, sizeof(*sa_dest));
+	}
 }
 
 bool is_localnet(const struct sockaddr *a)

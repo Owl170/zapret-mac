@@ -116,6 +116,9 @@ def check_case(binary, strategy, options, secure, certificate, key, transparent_
         endpoint = listener.getsockname()[1]
         route_endpoint(endpoint, transparent_root, secure)
         with socket.socket() as reserved:
+            # Previous accepted connections may still be in TIME_WAIT.
+            # Match the engine's SO_REUSEADDR while refusing live listeners.
+            reserved.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             reserved.bind(('127.0.0.1', 988 if transparent_root else 0))
             proxy_port = reserved.getsockname()[1]
 
