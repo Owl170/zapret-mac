@@ -1,6 +1,8 @@
 # ZapretMac
 
-Текущая версия: **0.2.5**.
+Текущая версия: **1.0.0**.
+
+Версия 1.0.0 — первый стабильный выпуск контроллера и TCP-функций. Голосовой UDP остаётся экспериментальным: успешная локальная проверка PF обязательна, а работоспособность звонка нужно подтвердить на вашем Mac.
 
 [Скачать последний релиз](https://github.com/Owl170/zapret-mac/releases/latest) · [Инструкция по голосу Discord](VOICE.md) · [Проверки macOS](https://github.com/Owl170/zapret-mac/actions/workflows/macos-check.yml) · [Аудит кода](AUDIT.md)
 
@@ -144,7 +146,7 @@ sudo python3 scripts/check_pf_udp.py
 
 Подключено расширение GitHub Actions [GitHub Tag Action](https://github.com/mathieudutour/github-tag-action). Workflow [Automatic version and release](.github/workflows/release.yml) запускается после каждого push в `main`:
 
-1. Выполняет тесты Python.
+1. Выполняет обязательную проверку macOS: тесты Python, универсальную сборку, проверки парсеров и HTTP/TLS под sanitizers, PF и UDP. Затем выполняет тесты Python на Ubuntu.
 2. Рассчитывает следующую версию по сообщениям коммитов: `fix: ...` повышает patch, `feat: ...` — minor, `feat!: ...` или `BREAKING CHANGE:` — major. Для остальных изменений по умолчанию повышается patch.
 3. Обновляет `VERSION`, строки текущей версии в README и VOICE.md, а также версию и контрольные суммы в `PROVENANCE.json`.
 4. Собирает и проверяет ZIP, затем сохраняет изменения коммитом бота, создаёт тег `vX.Y.Z` на этом коммите и публикует GitHub Release с ZIP и SHA256.

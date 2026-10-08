@@ -19,6 +19,103 @@ import zapret as z
 
 
 class RelayFailureTests(unittest.TestCase):
+    def failed_real_packets(self, times):
+        relay = u.Relay(Mock(return_value=('8.8.8.8', 50001)), profile='fake', payload=b'fake')
+        self.addCleanup(relay.close)
+        relay.selector.close()
+        relay.selector = Mock()
+        listener = Mock(family=socket.AF_INET)
+        listener.getsockname.return_value = ('127.0.0.1', u.UDP_PORT)
+        listener.fileno.return_value = 15
+        packet = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + bytes(12)
+        listener.recvfrom.return_value = (packet, ('192.0.2.1', 50001))
+        upstream = Mock(family=socket.AF_INET)
+        fake_packets = []
+
+        def send(data):
+            if data == b'fake':
+                fake_packets.append(data)
+                return len(data)
+            raise OSError(errno.EHOSTUNREACH, 'pending ICMP error')
+
+        upstream.send.side_effect = send
+        # The first clock sample records creation; each following sample is a
+        # discovery retry. Failed real sends must still consume the fake budget.
+        with patch.object(u.socket, 'socket', return_value=upstream), \
+                patch.object(u.time, 'monotonic', side_effect=[times[0], *times]):
+            for _ in times:
+                with self.assertRaises(OSError):
+                    relay.receive_client(listener)
+        self.assertEqual(relay.stats['fakes'], len(fake_packets))
+        return fake_packets
+
+    def test_failed_real_send_does_not_bypass_two_fake_groups(self):
+        self.assertEqual(len(self.failed_real_packets([2, 3, 4])), 12)
+
+    def test_failed_real_send_does_not_bypass_fake_interval(self):
+        self.assertEqual(len(self.failed_real_packets([2, 2.1])), 6)
+
+    def test_failed_real_send_keeps_successfully_sent_fake_count(self):
+        self.assertEqual(len(self.failed_real_packets([2])), 6)
+
+    def test_successful_real_send_does_not_double_count_fakes(self):
+        relay = u.Relay(Mock(return_value=('8.8.8.8', 50001)), profile='fake', payload=b'fake')
+        self.addCleanup(relay.close)
+        relay.selector.close()
+        relay.selector = Mock()
+        listener = Mock(family=socket.AF_INET)
+        listener.getsockname.return_value = ('127.0.0.1', u.UDP_PORT)
+        listener.fileno.return_value = 15
+        packet = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + bytes(12)
+        listener.recvfrom.return_value = (packet, ('192.0.2.1', 50001))
+        upstream = Mock(family=socket.AF_INET)
+        with patch.object(u.socket, 'socket', return_value=upstream), \
+                patch.object(u.time, 'monotonic', return_value=2):
+            relay.receive_client(listener)
+        packets = [call.args[0] for call in upstream.send.call_args_list]
+        self.assertEqual(packets, [b'fake'] * 6 + [packet])
+        self.assertEqual(relay.stats['fakes'], 6)
+        self.assertEqual(relay.stats['forwarded'], 1)
+
+    def test_partial_fake_failure_counts_only_successful_fakes_and_keeps_return_value(self):
+        sock = Mock(family=socket.AF_INET)
+        sock.send.side_effect = [4, OSError(errno.EHOSTUNREACH, 'fake ICMP'), 4]
+        record = Mock()
+        self.assertEqual(u.transmit(sock, b'voice', b'fake', u.PROFILES['fake'], True,
+                                    on_fake=record), 1)
+        record.assert_called_once_with()
+        self.assertEqual([call.args[0] for call in sock.send.call_args_list], [b'fake', b'fake', b'voice'])
+
+    def test_late_fake_icmp_does_not_drop_following_plain_audio(self):
+        sock = Mock(family=socket.AF_INET)
+        sock.send.side_effect = [OSError(errno.EHOSTUNREACH, 'late fake ICMP'), None]
+        self.assertEqual(u.transmit(sock, b'plain audio', b'fake', u.PROFILES['ttl3'], False), 0)
+        self.assertEqual([call.args for call in sock.send.call_args_list], [(b'plain audio',)] * 2)
+        sock.setsockopt.assert_not_called()
+
+    def test_listener_close_error_still_closes_remaining_sockets(self):
+        relay = u.Relay(Mock(), profile='relay')
+        self.addCleanup(relay.close)
+        relay.listen(('127.0.0.1', 0))
+        relay.listen(('127.0.0.1', 0))
+        first, second = relay.listeners
+
+        class BrokenClose:
+            def fileno(self):
+                return first.fileno()
+
+            def close(self):
+                first.close()
+                raise OSError('close failed')
+
+        relay.listeners[0] = BrokenClose()
+        with self.assertRaisesRegex(OSError, 'close failed'):
+            relay.close()
+        self.assertEqual(first.fileno(), -1)
+        self.assertEqual(second.fileno(), -1)
+        self.assertIsNone(relay.selector.get_map())
+        self.assertEqual(relay.listeners, [])
+
     def test_direct_loopback_datagrams_cannot_terminate_relay(self):
         resolver = Mock(side_effect=OSError(errno.ENOENT, 'no PF state'))
         relay = u.Relay(resolver, profile='relay')
@@ -360,6 +457,71 @@ class BackendFailureTests(unittest.TestCase):
         z.write_json(self.root / 'runtime/udp-status.json', [])
         with self.assertRaisesRegex(z.Error, 'файл состояния UDP'):
             v.read_status(self.root)
+
+
+class ResolverLifecycleTests(unittest.TestCase):
+    def test_blank_natlook_einval_keeps_resolver_open_for_real_requests(self):
+        ioctl = Mock(side_effect=OSError(errno.EINVAL, 'blank lookup'))
+        with patch.object(u.sys, 'platform', 'darwin'), \
+                patch.dict(sys.modules, {'fcntl': types.SimpleNamespace(ioctl=ioctl)}), \
+                patch.object(u.os, 'open', return_value=91), patch.object(u.os, 'close') as close:
+            resolver = u.PFResolver()
+            close.assert_not_called()
+            resolver.close()
+            resolver.close()
+        close.assert_called_once_with(91)
+
+    def test_unexpected_blank_natlook_success_closes_descriptor_and_rejects_abi(self):
+        with patch.object(u.sys, 'platform', 'darwin'), \
+                patch.dict(sys.modules, {'fcntl': types.SimpleNamespace(ioctl=Mock())}), \
+                patch.object(u.os, 'open', return_value=91), patch.object(u.os, 'close') as close:
+            with self.assertRaisesRegex(z.Error, 'ABI'):
+                u.PFResolver()
+        close.assert_called_once_with(91)
+
+    def test_interrupted_natlook_initialization_closes_descriptor(self):
+        ioctl = Mock(side_effect=KeyboardInterrupt())
+        with patch.object(u.sys, 'platform', 'darwin'), \
+                patch.dict(sys.modules, {'fcntl': types.SimpleNamespace(ioctl=ioctl)}), \
+                patch.object(u.os, 'open', return_value=91), patch.object(u.os, 'close') as close:
+            with self.assertRaises(KeyboardInterrupt):
+                u.PFResolver()
+        close.assert_called_once_with(91)
+
+    def main_root(self, directory):
+        root = Path(directory)
+        (root / 'payloads').mkdir()
+        (root / 'payloads/discord-fake.bin').write_bytes(b'fake')
+        (root / 'runtime').mkdir()
+        (root / 'runtime/udp-probe.json').write_text(json.dumps({'token': '01' * 16}))
+        (root / 'runtime/excluded_ips.txt').write_text('')
+        return root
+
+    def test_invalid_exclusions_after_opening_pf_still_close_resolver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.main_root(directory)
+            resolver = Mock()
+            with patch.object(u.sys, 'argv', ['discord_udp.py', 'serve', '--root', str(root)]), \
+                    patch.object(u, 'config', return_value=dict(z.DEFAULTS, ipv6=False)), \
+                    patch.object(u, 'PFResolver', return_value=resolver), \
+                    patch.object(z, 'load_entries', side_effect=z.Error('invalid exclusion')):
+                with self.assertRaisesRegex(z.Error, 'invalid exclusion'):
+                    u.main()
+            resolver.close.assert_called_once()
+
+    def test_relay_close_error_does_not_leak_pf_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.main_root(directory)
+            resolver, relay = Mock(), Mock()
+            relay.close.side_effect = OSError('socket close failed')
+            with patch.object(u.sys, 'argv', ['discord_udp.py', 'serve', '--root', str(root)]), \
+                    patch.object(u, 'config', return_value=dict(z.DEFAULTS, ipv6=False)), \
+                    patch.object(u, 'PFResolver', return_value=resolver), \
+                    patch.object(u, 'Relay', return_value=relay), patch.object(u.signal, 'signal'):
+                with self.assertRaisesRegex(OSError, 'socket close failed'):
+                    u.main()
+            relay.serve.assert_called_once()
+            resolver.close.assert_called_once()
 
 
 if __name__ == '__main__':

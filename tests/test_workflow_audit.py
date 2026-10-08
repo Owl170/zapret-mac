@@ -1,7 +1,11 @@
 import io
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import unittest
 
-from scripts.release_state import classify
+from scripts.release_state import changed_files, classify
 from scripts.run_tests import counts, run_suite
 
 
@@ -49,7 +53,42 @@ class WorkflowAuditTests(unittest.TestCase):
         self.assertEqual(classify('source', 'source', 'previous', 'fix: UDP path', '0.2.4'), '')
 
     def test_rerun_after_bot_push_resumes_the_same_version(self):
-        self.assertEqual(classify('source', 'bot', 'source', 'chore(release): v0.2.5', '0.2.5'), '0.2.5')
+        self.assertEqual(classify('source', 'bot', 'source', 'chore(release): v0.2.5', '0.2.5',
+                                 ['VERSION', 'README.md', 'VOICE.md', 'PROVENANCE.json']), '0.2.5')
+
+    def test_bot_subject_cannot_reuse_native_gate_after_executable_changes(self):
+        for name in ['zapret.py', 'discord_udp.py', 'scripts/package.py', '.github/workflows/release.yml']:
+            with self.subTest(name=name):
+                self.assertIsNone(classify('source', 'bot', 'source', 'chore(release): v0.2.5', '0.2.5', ['VERSION', name]))
+
+    def test_explicit_first_stable_commit_publishes_exact_requested_version(self):
+        self.assertEqual(classify('stable', 'stable', 'previous', 'chore(release): v1.0.0', '1.0.0',
+                                 ['zapret.py', 'VERSION']), '1.0.0')
+
+    def test_renamed_executable_cannot_hide_its_deleted_path_as_metadata(self):
+        if shutil.which('git') is None:
+            self.skipTest('Git CLI unavailable')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
+
+            git('init', '-q')
+            git('config', 'user.name', 'Release test')
+            git('config', 'user.email', 'release-test@example.invalid')
+            (root / 'zapret.py').write_text('# executable source\n', encoding='utf-8')
+            git('add', '.')
+            git('commit', '-qm', 'source')
+            source = git('rev-parse', 'HEAD')
+            (root / 'zapret.py').rename(root / 'README.md')
+            git('add', '-A')
+            git('commit', '-qm', 'chore(release): v1.0.0')
+            head = git('rev-parse', 'HEAD')
+            changed = changed_files(root, source, head)
+            self.assertIn('zapret.py', changed)
+            self.assertIn('README.md', changed)
+            self.assertIsNone(classify(source, head, source, 'chore(release): v1.0.0', '1.0.0', changed))
 
     def test_manual_dispatch_on_bot_commit_resumes_existing_version(self):
         self.assertEqual(classify('bot', 'bot', 'source', 'chore(release): v0.2.5', '0.2.5'), '0.2.5')

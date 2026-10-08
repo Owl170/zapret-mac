@@ -15,7 +15,7 @@ import struct
 import sys
 import time
 
-from zapret import Error, config, ROOT, write_json
+from zapret import Error, cleanup_steps, config, ROOT, write_json
 
 UDP_PORT = 989
 TEST_PORT = 19294
@@ -65,10 +65,15 @@ class PFResolver:
         self.fd = os.open('/dev/pf', os.O_RDONLY)
         try:
             self.ioctl(self.fd, DIOCNATLOOK, bytearray(NATLOOK_SIZE), True)
-        except OSError as error:
-            if error.errno != errno.EINVAL:
-                self.close()
+        except BaseException as error:
+            if isinstance(error, OSError) and error.errno == errno.EINVAL:
+                return
+            self.close()
+            if isinstance(error, OSError):
                 raise Error(f'PF NAT lookup ABI недоступен: {error}') from error
+            raise
+        self.close()
+        raise Error('PF NAT lookup не отверг пустой запрос; ABI не подтверждён.')
 
     def __call__(self, client, local, family):
         last = None
@@ -86,8 +91,9 @@ class PFResolver:
 
     def close(self):
         if self.fd is not None:
-            os.close(self.fd)
+            descriptor = self.fd
             self.fd = None
+            os.close(descriptor)
 
 
 def classify(data):
@@ -105,7 +111,7 @@ def classify(data):
     return 'other'
 
 
-def transmit(sock, data, payload, profile, inject):
+def transmit(sock, data, payload, profile, inject, *, on_fake=None):
     """Fakes and real packet use exactly the same socket/NAT mapping."""
     sent = 0
     if inject and profile['repeats']:
@@ -119,10 +125,12 @@ def transmit(sock, data, payload, profile, inject):
             for _ in range(profile['repeats']):
                 try:
                     sock.send(payload)
-                    sent += 1
                 except OSError:
                     # Fake injection is optional; preserve delivery of real data.
                     break
+                sent += 1
+                if on_fake is not None:
+                    on_fake()
         except OSError:
             pass
         finally:
@@ -134,7 +142,7 @@ def transmit(sock, data, payload, profile, inject):
     try:
         sock.send(data)
     except OSError as error:
-        if inject and error.errno in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
+        if (inject or profile['repeats']) and error.errno in (errno.EHOSTUNREACH, errno.ECONNREFUSED):
             # Consume a pending ICMP error from an expired fake and retry once.
             sock.send(data)
         else:
@@ -267,12 +275,17 @@ class Relay:
             self.stats['discoveries'] += 1
         if kind == 'stun':
             self.stats['stun'] += 1
-        self.stats['fakes'] += transmit(session['socket'], data, self.payload, self.profile, inject)
-        self.stats['forwarded'] += 1
-        session['last'] = now
         if inject:
+            # Reserve the attempt before sending: an error on the real packet
+            # must not make the next retry bypass the fake budget or interval.
             session['injections'] += 1
             session['last_injection'] = now
+        def record_fake():
+            self.stats['fakes'] += 1
+
+        transmit(session['socket'], data, self.payload, self.profile, inject, on_fake=record_fake)
+        self.stats['forwarded'] += 1
+        session['last'] = now
 
     def receive_upstream(self, key):
         session = self.sessions.get(key)
@@ -323,17 +336,17 @@ class Relay:
                 self.close()
 
     def close(self):
-        for key in list(self.sessions):
-            self.close_session(key)
-        for listener in self.listeners:
+        def close_listener(listener):
             try:
                 self.selector.unregister(listener)
             except (KeyError, ValueError):
                 pass
             finally:
                 listener.close()
-        self.listeners.clear()
-        self.selector.close()
+
+        cleanup_steps(*(lambda key=key: self.close_session(key) for key in list(self.sessions)),
+                      *(lambda listener=listener: close_listener(listener) for listener in self.listeners),
+                      self.listeners.clear, self.selector.close)
 
 
 def probe(address, token, timeout=3, *, debug=False):
@@ -434,11 +447,12 @@ def main():
     probe_settings = json.loads((args.root / 'runtime' / 'udp-probe.json').read_text())
     resolver = PFResolver()
     from zapret import load_entries
-    relay = Relay(resolver, cfg['voice_profile'], payload,
-                  probe_token=bytes.fromhex(probe_settings['token']),
-                  status_path=args.root / 'runtime' / 'udp-status.json',
-                  exclusions=load_entries(args.root / 'runtime/excluded_ips.txt', 'ip'))
+    relay = None
     try:
+        relay = Relay(resolver, cfg['voice_profile'], payload,
+                      probe_token=bytes.fromhex(probe_settings['token']),
+                      status_path=args.root / 'runtime' / 'udp-status.json',
+                      exclusions=load_entries(args.root / 'runtime/excluded_ips.txt', 'ip'))
         relay.listen(('127.0.0.1', UDP_PORT))
         if cfg['ipv6']:
             import zapret
@@ -452,8 +466,7 @@ def main():
         signal.signal(signal.SIGINT, stop_signal)
         relay.serve()
     finally:
-        relay.close()
-        resolver.close()
+        cleanup_steps(lambda: relay.close() if relay else None, resolver.close)
 
 
 if __name__ == '__main__':

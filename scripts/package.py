@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import tempfile
 import zipfile
 
@@ -53,6 +54,14 @@ def replace_files(contents):
     """Stage all writes and restore previous files if a replacement fails."""
     staged, backups, modes = {}, {}, {}
     committed, retained = [], set()
+    operation_error = None
+
+    def report_cleanup(path, error):
+        try:
+            print(f'Temporary file cleanup failed for {path}: {error}', file=sys.stderr)
+        except BaseException:
+            # Diagnostics must not replace the error that requires recovery.
+            pass
 
     def temporary(path, data, mode):
         fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
@@ -62,7 +71,10 @@ def replace_files(contents):
                 output.write(data)
             os.chmod(target, mode)
         except BaseException:
-            target.unlink(missing_ok=True)
+            try:
+                target.unlink(missing_ok=True)
+            except BaseException as cleanup_error:
+                report_cleanup(target, cleanup_error)
             raise
         return target
 
@@ -80,22 +92,31 @@ def replace_files(contents):
             committed.append(path)
             os.replace(temporary_path, path)
     except BaseException as error:
+        operation_error = error
         for path in reversed(committed):
             try:
                 if backups[path] is None:
                     path.unlink(missing_ok=True)
                 else:
                     os.replace(backups[path], path)
-            except OSError:
+            except BaseException:
                 retained.add(backups[path] or path)
         if retained:
             raise RuntimeError('Rollback failed; recovery files retained: ' +
                                ', '.join(str(path) for path in retained)) from error
         raise
     finally:
+        cleanup_errors = []
         for path in [*staged.values(), *backups.values()]:
             if path is not None and path not in retained:
-                path.unlink(missing_ok=True)
+                try:
+                    path.unlink(missing_ok=True)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append((path, cleanup_error))
+        for path, cleanup_error in cleanup_errors:
+            report_cleanup(path, cleanup_error)
+        if cleanup_errors and operation_error is None:
+            raise cleanup_errors[0][1]
 
 
 def package(root):
