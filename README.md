@@ -1,6 +1,6 @@
 # ZapretMac
 
-Текущая версия: **0.2.4**.
+Текущая версия: **0.2.5**.
 
 [Скачать последний релиз](https://github.com/Owl170/zapret-mac/releases/latest) · [Инструкция по голосу Discord](VOICE.md) · [Проверки macOS](https://github.com/Owl170/zapret-mac/actions/workflows/macos-check.yml) · [Аудит кода](AUDIT.md)
 
