@@ -1,9 +1,9 @@
 {
-  "version": "1.1.5",
+  "version": "1.1.6",
   "flowseal_tag": "1.10.3",
   "flowseal_release_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.3",
   "zapret_commit": "c4d0b1990129dce2b28095277173ee0d7702d304",
-  "tested_on": "Windows: 316 Python tests passed (10 skipped; 326 total)",
+  "tested_on": "GitHub Actions Ubuntu: 324 Python tests passed (2 skipped; 326 total)",
   "macos_build_and_network_tested": true,
   "sha256": {
     ".gitattributes": "446dbe4b9a9103fe6a411cc46e70b18a4d2d9174ad02e117b4b607b8db93695f",
@@ -12,10 +12,10 @@
     ".gitignore": "4f2d4b7f19ffbd8d7874b060bfb15a9d8fe3eee9fc4c44758ab8b1d2fab031bb",
     "AUDIT.md": "0e5881a360f879b3ec8ce1c832465146c069c466336889bd08c5fb9424353060",
     "LICENSE": "1b6b87af686de1f8da4a7233ae4cca7f4f08062ee9e285b47284e9e61746f4e4",
-    "README.md": "42891f6186aaa7a4fc22536e9f64420cc540f77808ab4ea32dc71ab8c8f733f3",
+    "README.md": "4e6cd64db7cd01ee239e31554185cdb9316ddde6e6a3d0e1622199d670125806",
     "THIRD_PARTY.md": "ef1177d47d497848ffe38553d070737b66c27bc99862676f541f1624a0624fea",
-    "VERSION": "1c60df040a80b6d2e3f56442b17d127d8620cd773873e6e1353362f989b1deca",
-    "VOICE.md": "b38ef792321e632c9dda73e511a6f90d9617466db4dca2692ffda8b4255ca2c6",
+    "VERSION": "2f66e2158a2645e2455e374272c8deb113173dca586f9159f813519a50436c32",
+    "VOICE.md": "1c3707957a84065d78f797539791763d17e339a2ff6453bca7c655bb27badf64",
     "application_update.py": "0ef46b04b71d47afd88064cd75cc88aa75a153dc51703f6e6b63b0f75ab29c6d",
     "discord_cache.py": "029c9abc5912b1d8d1e1ddf59d09040834784a55965761fcb3d396a460de9ca7",
     "discord_probe.py": "7d48c47e1d41f6b13822ce111d25b0856ce2164aa7c7b3c927ddd3b787746d35",
@@ -131,12 +131,12 @@
   "discord_voice_tested": false,
   "validation": {
     "date": "2026-10-08",
-    "python_tests_passed": 316,
+    "python_tests_passed": 324,
     "live_udp_tests": 6,
     "python_39_syntax_files": 31,
     "bash_syntax_launchers": 4,
     "native_macos_checks": "Executed on GitHub macOS 14 and 15: 247 Python tests and 16 Discord probe tests with /usr/bin/python3 per OS, universal build, parser and address-copy ASan/UBSan checks, 16 SOCKS and 16 transparent PF HTTP/TLS exchanges, 100 engine configurations, 16 PF syntax checks, ABI and full IPv4 UDP PF path passed. IPv6 disabled after failed route probe. External DPI bypass, account login and real two-way voice are not verified.",
-    "python_tests_platform": "Windows",
+    "python_tests_platform": "GitHub Actions Ubuntu",
     "macos_ci": {
       "commit": "a5052a10b7adf1cc460ebfcb37ab31264cf586d9",
       "run_url": "https://github.com/Owl170/zapret-mac/actions/runs/37824216156",
@@ -182,7 +182,7 @@
     },
     "discord_application_probes": "Four unauthenticated stages passed on available Windows connection; local HTTP/WebSocket malformed/partial tests passed; affected Mac connection pending",
     "python_tests_run": 326,
-    "python_tests_skipped": 10
+    "python_tests_skipped": 2
   },
   "discord_udp_payload_source": "https://github.com/Flowseal/zapret-discord-youtube/blob/1.10.3/bin/ACTIVE_DISCORD_UDP.bin",
   "udp_transport": "Experimental PF redirect + DIOCNATLOOK + connected BSD UDP sockets. Requires successful local PF probe before ordinary UDP interception.",
