@@ -1,6 +1,7 @@
 """A failed new UDP flow must not displace a negotiated voice socket."""
 import errno
 from pathlib import Path
+import select
 import socket
 import sys
 import unittest
@@ -26,6 +27,7 @@ class _RelayFixture(unittest.TestCase):
             self.addCleanup(client.close)
             setattr(self, name, client)
         self.voice_client.sendto(b'\x00\x01\x00\x46' + bytes(70), self.address)
+        self.wait_for_client_packet()
         self.relay.receive_client(self.listener)
         self.voice_key = next(iter(self.relay.sessions))
         self.voice_socket = self.relay.sessions[self.voice_key]['socket']
@@ -40,8 +42,13 @@ class _RelayFixture(unittest.TestCase):
         self.assertEqual(self.relay.stats['capacity_closed'], 0)
         self.assertEqual(self.relay.stats['session_created'], 1)
 
+    def wait_for_client_packet(self):
+        ready, _, _ = select.select([self.listener], [], [], 2)
+        self.assertIn(self.listener, ready, 'UDP test packet was not ready within 2 seconds')
+
     def new_packet(self):
         self.new_client.sendto(b'new flow', self.address)
+        self.wait_for_client_packet()
 
 
 class CapacitySetupErrorTests(_RelayFixture):
@@ -59,6 +66,7 @@ class CapacitySetupErrorTests(_RelayFixture):
         self.relay.profile = u.PROFILES['fake']
         self.relay.payload = b'fake'
         self.new_client.sendto(b'\x00\x01\x00\x46' + bytes(70), self.address)
+        self.wait_for_client_packet()
         with patch.object(u.socket, 'socket', return_value=wrapped):
             with self.assertRaises(BlockingIOError):
                 self.relay.receive_client(self.listener)
@@ -178,6 +186,7 @@ class EndpointSetupErrorTests(_RelayFixture):
 
     def changed_packet(self):
         self.voice_client.sendto(b'new endpoint audio', self.address)
+        self.wait_for_client_packet()
 
     def test_initial_send_errors_keep_old_endpoint_without_misrouting(self):
         for failure in (BlockingIOError(errno.EWOULDBLOCK, 'would block'),
