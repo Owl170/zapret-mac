@@ -12,6 +12,10 @@ APPS = ('discord', 'discordcanary', 'discordptb')
 CACHES = ('Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache',
           'DawnWebGPUCache', 'ShaderCache', 'GrShaderCache',
           'Service Worker/CacheStorage', 'Service Worker/ScriptCache')
+# Bundle names can change when a user renames or copies the app. Match the
+# executable in Contents/MacOS, including the supported clients and helpers.
+DISCORD_PROCESS_PATTERN = (r'/Contents/MacOS/Discord( ?Canary| ?PTB)?'
+                           r'( Helper( \([^/()]*\))?)?([[:space:]]|$)')
 
 
 def backup(home):
@@ -60,7 +64,7 @@ def backup(home):
     def ensure_closed():
         if sys.platform == 'darwin':
             result = subprocess.run(['/usr/bin/pgrep', '-u', str(os.getuid()), '-if',
-                                     '/Discord[^/]*/.*MacOS|/Discord[^/]*/.*Helper'],
+                                     DISCORD_PROCESS_PATTERN],
                                     capture_output=True, text=True, timeout=5)
             if result.returncode != 1:
                 raise OSError('Discord запущен или его состояние не подтверждено; кэш сохранён.')
@@ -105,8 +109,9 @@ def backup(home):
                 if exists(parent, source) is not None:
                     raise OSError('Cache was recreated; backup retained: ' + destination)
                 rename(parent, destination, source)
-            except OSError as rollback:
-                failures.append(str(rollback))
+            except BaseException as rollback:
+                # A second interrupt must not skip independent restorations.
+                failures.append(f'{destination}: {type(rollback).__name__}: {rollback}')
         if failures:
             raise OSError(str(error) + '; rollback: ' + '; '.join(failures)) from error
         raise

@@ -159,6 +159,22 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(r.recover(self.root, z.DEFAULTS, report, Mock()))
         dns.assert_not_called()
 
+    def test_completed_page_with_blocked_script_can_recover_another_endpoint(self):
+        rows = self.rows(True)
+        next(row for row in rows if row['name'] == 'DiscordScript')['application_ok'] = False
+        report = dict(accepted=False, trials=[dict(strategy='tlsrec', rows=rows)], confirmation=[])
+        app = [dict(name=name, application_ok=True) for name in d.CHECKS[:2]]
+        def accept(name, confirmation):
+            report.update(accepted=True, selected=name)
+        with patch.object(r, 'candidate_addresses', return_value=[IP]) as dns, \
+                patch.object(z, 'stop'), patch.object(z, 'start'), patch.object(z, 'write_json'), \
+                patch.object(z, 'discord_tests', return_value=app), \
+                patch.object(z, 'network_tests', side_effect=[self.rows(True), self.rows(True)]):
+            self.assertTrue(r.recover(self.root, z.DEFAULTS, report, accept))
+        dns.assert_called_once()
+        self.assertIn(IP + ' discord.com', self.hosts.read_text())
+        self.assertEqual(len(report['endpoint_recovery']['attempts'][0]['confirmation']), 2)
+
     def test_ipv4_mapped_results_are_not_counted_as_native_ipv6(self):
         address = (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::ffff:' + IP, 443, 0, 0))
         with patch.object(d.socket, 'getaddrinfo', return_value=[address]), patch.object(d.socket, 'socket') as create:

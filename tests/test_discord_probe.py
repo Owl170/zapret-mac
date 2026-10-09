@@ -133,6 +133,9 @@ class HttpTests(unittest.TestCase):
                                      else 'bytes 0-1023/9999')
                 self.send_header('Content-Length', str(length))
                 self.end_headers()
+                if self.server.mode == 'delayed-body':
+                    self.wfile.flush()
+                    time.sleep(0.3)
                 self.wfile.write(body)
             def log_message(self, *args):
                 pass
@@ -168,6 +171,16 @@ class HttpTests(unittest.TestCase):
     def test_response_size_is_bounded(self):
         with self.assertRaises(d.ProbeError):
             d.fetch(d.APP, 10)
+
+    def test_connection_close_body_read_uses_remaining_deadline(self):
+        # HTTP/1.0 transfers the socket to HTTPResponse and clears conn.sock.
+        # Allow five seconds for headers, then only 50 ms for a body stalled 300 ms.
+        self.server.mode = 'delayed-body'
+        with patch.object(d, 'remaining', side_effect=[5, 0.05]), self.assertRaises(d.TransferError) as failure:
+            d.fetch(d.APP, 65536)
+        self.assertTrue(failure.exception.tls_reached)
+        self.assertEqual(failure.exception.http, '200')
+        self.assertIn('timed out', str(failure.exception))
 
     def test_api_validates_public_gateway_url(self):
         d.api_check()
