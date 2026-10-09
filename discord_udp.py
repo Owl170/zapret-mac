@@ -282,15 +282,21 @@ class Relay:
         kind = classify(data)
         key = (listener.fileno(), client)
         session = self.sessions.get(key)
-        if session and session['destination'] != destination:
-            self.close_session(key, 'endpoint')
+        replacing = session is not None and session['destination'] != destination
+        staged = False
+        if replacing:
             session = None
         if not session:
-            if len(self.sessions) >= self.max_sessions:
-                ordinary = [k for k, s in self.sessions.items() if not s.get('preserve_port')]
-                victim = min(ordinary or self.sessions, key=lambda k: self.sessions[k]['last'])
-                self.close_session(victim, 'capacity')
             upstream = socket.socket(listener.family, socket.SOCK_DGRAM)
+
+            def discard_upstream():
+                try:
+                    self.selector.unregister(upstream)
+                except (KeyError, ValueError):
+                    pass
+                finally:
+                    upstream.close()
+
             try:
                 upstream.connect(destination)
                 upstream.setblocking(False)
@@ -299,10 +305,16 @@ class Relay:
                                injections=0, last_injection=0, preserve_port=False,
                                sent=0, replies=0, last_reply=None)
                 self.selector.register(upstream, selectors.EVENT_READ, ('upstream', key))
-                self.sessions[key] = session
-                self.stats['session_created'] += 1
+                # A new flow must successfully send its real packet before it can
+                # displace a negotiated socket. One temporary fd is reserved.
+                staged = replacing or len(self.sessions) >= self.max_sessions
+                if not staged:
+                    # Keep failed-send retries on this socket when no old flow
+                    # is at risk, preserving its fake budget and NAT mapping.
+                    self.sessions[key] = session
+                    self.stats['session_created'] += 1
             except Exception:
-                upstream.close()
+                discard_upstream()
                 raise
         # Discovery/STUN advertises this socket's external port to the peer.
         # Reopening it after silence changes that port without renegotiation.
@@ -325,11 +337,25 @@ class Relay:
         def record_fake():
             self.stats['fakes'] += 1
 
-        transmit(session['socket'], data, self.payload, self.profile, inject, on_fake=record_fake)
-        self.stats['forwarded'] += 1
-        self.stats['last_forward_at'] = time.time()
-        session['sent'] += 1
-        session['last'] = now
+        try:
+            transmit(session['socket'], data, self.payload, self.profile, inject, on_fake=record_fake)
+            self.stats['forwarded'] += 1
+            self.stats['last_forward_at'] = time.time()
+            session['sent'] += 1
+            session['last'] = now
+            if staged:
+                if replacing:
+                    self.close_session(key, 'endpoint')
+                else:
+                    ordinary = [k for k, s in self.sessions.items() if not s.get('preserve_port')]
+                    victim = min(ordinary or self.sessions, key=lambda k: self.sessions[k]['last'])
+                    self.close_session(victim, 'capacity')
+                self.sessions[key] = session
+                self.stats['session_created'] += 1
+        except Exception:
+            if staged:
+                discard_upstream()
+            raise
 
     def receive_upstream(self, key):
         session = self.sessions.get(key)

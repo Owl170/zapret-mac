@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import secrets
+import subprocess
 import sys
 import time
 

@@ -135,7 +135,7 @@ def recover(root, previous, report, accept):
     candidates = [trial for trial in report['trials']
                   if all(any(row['name'] == name and row['tls_reached'] is True
                              for row in trial['rows']) for name in REQUIRED)
-                  and any(row['name'] == 'DiscordApp' and row.get('application_ok') is False
+                  and any(row['name'] in ('DiscordApp', 'DiscordScript') and row.get('application_ok') is False
                           for row in trial['rows'])]
     if not candidates:
         return False

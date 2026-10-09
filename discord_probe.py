@@ -105,6 +105,11 @@ def fetch(url, limit, prefix=False, family=None, trace=None, app_ip=None):
             headers['Range'] = f'bytes=0-{limit-1}'
         conn.request('GET', parsed.path + ('?' + parsed.query if parsed.query else ''),
                      headers=headers)
+        # getresponse() detaches conn.sock for Connection: close. HTTPResponse
+        # keeps that socket alive through its file object until the body ends.
+        transport = conn.sock
+        if transport is not None:
+            transport.settimeout(remaining(deadline))
         response = conn.getresponse()
         if response.status != (206 if prefix else 200):
             raise ProbeError(f'HTTP {response.status}')
@@ -118,8 +123,8 @@ def fetch(url, limit, prefix=False, family=None, trace=None, app_ip=None):
             raise ProbeError('Ответ превышает лимит проверки')
         while True:
             # read1 returns available data, so the deadline also bounds slow streams.
-            if conn.sock is not None:
-                conn.sock.settimeout(remaining(deadline))
+            if transport is not None and not response.isclosed():
+                transport.settimeout(remaining(deadline))
             else:
                 remaining(deadline)
             block = response.read1(min(65536, limit + 1 - len(result)))

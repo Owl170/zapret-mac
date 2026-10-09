@@ -874,7 +874,8 @@ def original_user():
 def clean_discord_cache(root=ROOT):
     require_mac(True)
     user = original_user()
-    running = run(['/usr/bin/pgrep', '-u', str(user.pw_uid), '-if', '/Discord[^/]*/.*MacOS|/Discord[^/]*/.*Helper'], check=False)
+    from discord_cache import DISCORD_PROCESS_PATTERN
+    running = run(['/usr/bin/pgrep', '-u', str(user.pw_uid), '-if', DISCORD_PROCESS_PATTERN], check=False)
     if running.returncode == 0:
         raise Error('Полностью закройте Discord перед очисткой кеша.')
     if running.returncode != 1:
