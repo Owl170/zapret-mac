@@ -114,18 +114,16 @@ class StableControllerTests(unittest.TestCase):
         cache.mkdir(parents=True)
         (cache / 'entry').write_bytes(b'preserve active cache')
         user = SimpleNamespace(pw_uid=501, pw_dir=str(home))
-        for code in (2, 3):
-            with self.subTest(returncode=code):
-                def failed_inventory(args, **kwargs):
-                    if args[0] == '/usr/bin/pgrep':
-                        return SimpleNamespace(returncode=code, stderr='process inventory failed')
-                    raise AssertionError('Cache moved without a reliable Discord process check')
+        def failed_inventory(args, **kwargs):
+            self.assertEqual(args[:4], ['/usr/bin/sudo', '-u', '#501', '--'])
+            self.assertIn('--close', args)
+            raise z.Error('process inventory failed; cache preserved')
 
-                with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=user), \
-                        patch.object(z, 'run', side_effect=failed_inventory), self.assertRaises(z.Error):
-                    z.clean_discord_cache(self.root)
-                self.assertEqual((cache / 'entry').read_bytes(), b'preserve active cache')
-                self.assertEqual(list(cache.parent.glob('Cache.zapret-backup-*')), [])
+        with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=user), \
+                patch.object(z, 'run', side_effect=failed_inventory), self.assertRaisesRegex(z.Error, 'inventory failed'):
+            z.clean_discord_cache(self.root)
+        self.assertEqual((cache / 'entry').read_bytes(), b'preserve active cache')
+        self.assertEqual(list(cache.parent.glob('Cache.zapret-backup-*')), [])
 
     def test_open_foreign_listener_cannot_make_engine_ready(self):
         child = Mock(pid=123)

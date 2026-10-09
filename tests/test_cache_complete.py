@@ -2,9 +2,8 @@ import errno
 import os
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import discord_cache as cache
 
@@ -84,10 +83,10 @@ class CompleteCacheTests(unittest.TestCase):
     def test_discord_starting_during_cleanup_rolls_back(self):
         self.entry('Cache/entry')
         self.entry('Code Cache/entry')
-        outcomes = [SimpleNamespace(returncode=n) for n in (1, 1, 0)]
+        inspector = Mock()
+        inspector.snapshot.side_effect = [{}, {}, {101: '/Applications/Chat.app/Contents/MacOS/Discord'}]
         with patch.object(cache.sys, 'platform', 'darwin'), \
-                patch.object(cache.os, 'getuid', return_value=501, create=True), \
-                patch.object(cache.subprocess, 'run', side_effect=outcomes):
+                patch.object(cache, 'MacDiscordProcesses', return_value=inspector):
             with self.assertRaisesRegex(OSError, 'Discord'):
                 cache.backup(self.home)
         self.assertEqual((self.app / 'Cache/entry').read_bytes(), b'cache')
@@ -112,10 +111,14 @@ class CompleteCacheTests(unittest.TestCase):
 
     def test_running_or_unknown_process_state_refuses_before_move(self):
         self.entry('Cache/entry')
-        for code in (0, 2):
-            with self.subTest(code=code), patch.object(cache.sys, 'platform', 'darwin'), \
-                    patch.object(cache.os, 'getuid', return_value=501, create=True), \
-                    patch.object(cache.subprocess, 'run', return_value=SimpleNamespace(returncode=code)):
+        for failure in ('running', 'unknown'):
+            inspector = Mock()
+            if failure == 'running':
+                inspector.snapshot.return_value = {101: '/Applications/Chat.app/Contents/MacOS/Discord'}
+            else:
+                inspector.snapshot.side_effect = OSError('Process state unknown')
+            with self.subTest(failure=failure), patch.object(cache.sys, 'platform', 'darwin'), \
+                    patch.object(cache, 'MacDiscordProcesses', return_value=inspector):
                 with self.assertRaises(OSError):
                     cache.backup(self.home)
             self.assertEqual((self.app / 'Cache/entry').read_bytes(), b'cache')
