@@ -874,20 +874,18 @@ def original_user():
 def clean_discord_cache(root=ROOT):
     require_mac(True)
     user = original_user()
-    from discord_cache import DISCORD_PROCESS_PATTERN
-    running = run(['/usr/bin/pgrep', '-u', str(user.pw_uid), '-if', DISCORD_PROCESS_PATTERN], check=False)
-    if running.returncode == 0:
-        raise Error('Полностью закройте Discord перед очисткой кеша.')
-    if running.returncode != 1:
-        raise Error('Не удалось проверить, закрыт ли Discord; кеш сохранён. '
-                    + getattr(running, 'stderr', '').strip())
+    print('Закрываем Discord и фоновые процессы перед очисткой кэша…', flush=True)
     result = run(['/usr/bin/sudo', '-u', '#' + str(user.pw_uid), '--', sys.executable,
-                  Path(__file__).with_name('discord_cache.py'), user.pw_dir], timeout=None)
+                  Path(__file__).with_name('discord_cache.py'), '--close', user.pw_dir], timeout=None)
     report = json.loads(result.stdout)
+    if report.get('closed_processes', 0):
+        print(f'Завершено процессов Discord: {report["closed_processes"]}. '
+              f'Принудительно: {report.get("forced_processes", 0)}.')
     print(f'Очищено папок кэша: {len(report["moved"])}. Резервные копии сохранены рядом.')
     if report['skipped']:
         print('Пропущены ссылки или неподходящие пути:', ', '.join(report['skipped']))
     print('Данные входа и настройки аккаунта сохранены. Очистка кэша не проверяет доступ к серверу обновлений.')
+    print('Готово. Теперь можно открыть Discord снова.')
     return report
 
 
@@ -1289,7 +1287,7 @@ def menu(root=ROOT):
         status(root)
         print('\n1. Подключить / перезапустить\n2. Остановить\n'
               '3. Автоматически подобрать стратегию\n4. Голос Discord\n'
-              '5. Очистить кэш Discord\n6. Проверить подключение\n'
+              '5. Закрыть Discord и очистить кэш\n6. Проверить подключение\n'
               f'7. Автозапуск [{"включён" if PLIST.exists() else "выключен"}]\n'
               '8. Обновить ZapretMac\n0. Выход')
         try:

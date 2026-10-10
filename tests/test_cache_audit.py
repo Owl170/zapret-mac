@@ -22,14 +22,21 @@ class CacheAuditTests(unittest.TestCase):
         self.user = SimpleNamespace(pw_uid=501, pw_dir=str(self.home))
 
     def cache_run(self, args, **kwargs):
-        if args[0] == '/usr/bin/pgrep':
-            return SimpleNamespace(returncode=1)
         # This boundary is essential: root must never rename directly inside
         # the user-controlled directory tree. Execute the child in isolation.
         self.assertEqual(args[:5], ['/usr/bin/sudo', '-u', '#501', '--', sys.executable])
+        self.assertEqual(args[-2:], ['--close', str(self.home)])
         self.assertIsNone(kwargs['timeout'], 'The parent must let the child finish its rollback')
-        return subprocess.run([str(a) for a in args[4:]], check=True,
-                              capture_output=True, text=True)
+        # This child exercises real filesystem backup in the temporary home.
+        # Process signalling has a separate native fixture restricted to its
+        # children; never close a developer's actual Discord from this test.
+        code = ('import discord_cache as cache\n'
+                'from unittest.mock import patch\n'
+                "with patch.object(cache, 'MacDiscordProcesses') as backend:\n"
+                '    backend.return_value.snapshot.return_value = {}\n'
+                '    cache.main()\n')
+        return subprocess.run([str(args[4]), '-c', code, *map(str, args[6:])], check=True,
+                              cwd=Path(z.__file__).parent, capture_output=True, text=True)
 
     def test_cache_backup_preserves_contents_without_privileged_rename(self):
         with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=self.user), \
@@ -43,9 +50,8 @@ class CacheAuditTests(unittest.TestCase):
 
     def test_user_permission_failure_leaves_original_cache_intact(self):
         def denied(args, **kwargs):
-            if args[0] == '/usr/bin/pgrep':
-                return SimpleNamespace(returncode=1)
             self.assertEqual(args[:4], ['/usr/bin/sudo', '-u', '#501', '--'])
+            self.assertIn('--close', args)
             raise z.Error('Permission denied for invoking user')
 
         with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=self.user), \

@@ -1,11 +1,11 @@
 """Regression coverage for renamed app bundles and interrupted cache rollback."""
 import os
+import json
 from pathlib import Path
-import re
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import discord_cache as cache
 import zapret as z
@@ -25,14 +25,6 @@ class DiscordCacheRegressionTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
-    def process_result(self, executable):
-        def run(args, **kwargs):
-            self.assertEqual(args[0], '/usr/bin/pgrep')
-            # pgrep uses POSIX ERE; Python needs an equivalent whitespace class.
-            pattern = args[-1].replace('[[:space:]]', r'\s')
-            return SimpleNamespace(returncode=0 if re.search(pattern, executable, re.I) else 1)
-        return run
-
     def test_renamed_running_discord_and_helpers_refuse_cleanup(self):
         executables = (
             '/Applications/Chat.app/Contents/MacOS/Discord',
@@ -44,9 +36,10 @@ class DiscordCacheRegressionTests(unittest.TestCase):
         )
         for executable in executables:
             self.entry('Cache', b'preserve')
+            inspector = Mock()
+            inspector.snapshot.return_value = {101: executable}
             with self.subTest(executable=executable), patch.object(cache.sys, 'platform', 'darwin'), \
-                    patch.object(cache.os, 'getuid', return_value=501, create=True), \
-                    patch.object(cache.subprocess, 'run', side_effect=self.process_result(executable)):
+                    patch.object(cache, 'MacDiscordProcesses', return_value=inspector):
                 with self.assertRaisesRegex(OSError, 'Discord'):
                     cache.backup(self.home)
                 self.assertEqual((self.app / 'Cache/entry').read_bytes(), b'preserve')
@@ -56,22 +49,24 @@ class DiscordCacheRegressionTests(unittest.TestCase):
         for executable in ('/Applications/Discord.app/Contents/MacOS/Other',
                            '/Applications/Chat.app/Contents/MacOS/DiscordProxy'):
             self.entry('Cache')
+            inspector = Mock()
+            inspector.snapshot.return_value = {}
             with self.subTest(executable=executable), patch.object(cache.sys, 'platform', 'darwin'), \
-                    patch.object(cache.os, 'getuid', return_value=501, create=True), \
-                    patch.object(cache.subprocess, 'run', side_effect=self.process_result(executable)):
+                    patch.object(cache, 'MacDiscordProcesses', return_value=inspector):
                 result = cache.backup(self.home)
                 self.assertFalse((self.app / 'Cache').exists())
                 self.assertEqual(result['moved'], ['discord/Cache'])
 
-    def test_parent_refuses_renamed_discord_before_starting_cache_child(self):
-        executable = '/Applications/Chat.app/Contents/MacOS/Discord'
+    def test_parent_requests_shutdown_in_unprivileged_cache_child(self):
         user = SimpleNamespace(pw_uid=501, pw_dir=str(self.home))
         self.entry('Cache', b'preserve')
         with patch.object(z, 'require_mac'), patch.object(z, 'original_user', return_value=user), \
-                patch.object(z, 'run', side_effect=self.process_result(executable)) as run:
-            with self.assertRaisesRegex(z.Error, 'Discord'):
-                z.clean_discord_cache()
-        self.assertEqual(run.call_count, 1)
+                patch.object(z, 'run', return_value=SimpleNamespace(stdout=json.dumps(dict(moved=[], skipped=[])))) as run:
+            z.clean_discord_cache()
+        args = run.call_args.args[0]
+        self.assertEqual(args[:4], ['/usr/bin/sudo', '-u', '#501', '--'])
+        self.assertEqual(args[-2:], ['--close', str(self.home)])
+        self.assertIsNone(run.call_args.kwargs['timeout'])
         self.assertEqual((self.app / 'Cache/entry').read_bytes(), b'preserve')
 
     def test_repeat_interrupt_during_rollback_does_not_skip_other_caches(self):
